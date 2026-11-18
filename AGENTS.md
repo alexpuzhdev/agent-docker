@@ -8,6 +8,7 @@
 - Проверка JS: `node --check` для каждого изменённого файла `.cjs`.
 - Проверка Git-шлюза: `node --test v2/tests/test_git_gateway.cjs`.
 - Проверка настройки Git через Make: `bash v2/tests/test_vm_setup_git.sh`.
+- Проверка статуса Git-шлюза: `bash v2/tests/test_vm_git_status.sh`.
 - Проверка гостевой консоли: `python3 -m unittest discover -s v2/tests -v`.
 - Этап сквозного теста: `make vm-setup VM=vm-01`, проверка результата установки, затем `make vm-stop VM=vm-01` и повторный запуск с тем же диском.
 - Шлюз принимает HTTP и HTTPS только во внутренней сети Compose. Порты 80 и 443 на хосте не публикуются.

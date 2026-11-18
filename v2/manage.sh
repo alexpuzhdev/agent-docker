@@ -126,6 +126,33 @@ write_git_config() (
     fi
     printf 'Git-шлюз настроен для %s. Адрес в госте: http://git.agent-docker.test/project.git\n' "$VM_NAME"
 )
+saved_git_settings() {
+    docker run --rm --pull never --network none \
+        --mount "type=bind,src=$root/v2,dst=/scripts,readonly" \
+        --mount "type=bind,src=$VM_STATE/git/repository.json,dst=/repository.json,readonly" \
+        "$base_image" node /scripts/git-gateway.cjs --settings /repository.json
+}
+git_status() {
+    local current repository writable branch
+    if ! test -e "$VM_STATE/git/repository.json" && ! test -L "$VM_STATE/git/repository.json"; then
+        printf 'Git-шлюз %s не настроен. Назначьте репозиторий: make vm-git VM=%s REPO=owner/name\n' "$VM_NAME" "$VM_NAME"
+        return
+    fi
+    current=$(saved_git_settings) || {
+        (( $? == 1 )) &&
+            fail "Не удалось прочитать сохранённую настройку Git-шлюза $VM_NAME. Задайте её заново: make vm-git VM=$VM_NAME REPO=owner/name"
+        fail "Не удалось проверить настройку Git-шлюза $VM_NAME: Docker не запустил парсер из образа $base_image."
+    }
+    read -r repository writable branch <<<"$current"
+    printf 'Git-шлюз %s\nРепозиторий: %s\n' "$VM_NAME" "$repository"
+    if [[ $writable = true && -n $branch ]]; then
+        printf 'Режим: чтение и запись\nРазрешённая ветка: %s\n' "$branch"
+    elif [[ $writable = true ]]; then
+        printf 'Режим: только чтение, запись включена без допустимой ветки\nРазрешённая ветка: нет\n'
+    else
+        printf 'Режим: только чтение\nРазрешённая ветка: нет\n'
+    fi
+}
 configure_git() (
     configured
     local repository mode branch writable
@@ -141,10 +168,7 @@ setup_git() (
         write_git_config create
         return
     fi
-    if ! current=$(docker run --rm --pull never --network none \
-        --mount "type=bind,src=$root/v2,dst=/scripts,readonly" \
-        --mount "type=bind,src=$VM_STATE/git/repository.json,dst=/repository.json,readonly" \
-        "$base_image" node /scripts/git-gateway.cjs --settings /repository.json); then
+    if ! current=$(saved_git_settings); then
         fail "Не удалось прочитать сохранённую настройку Git-шлюза $VM_NAME. Задайте её заново: $update"
     fi
     if [[ $current != "$repository $writable $branch" ]]; then
@@ -249,6 +273,7 @@ set_name "${VM:-vm-01}"
 case "$target" in
     vm-setup|init-claude) setup ;;
     vm-git) configure_git ;;
+    vm-git-status) git_status ;;
     vm-proxy)
         configure_proxy
         if test -f "$VM_STATE/resources" && docker image inspect "$image" >/dev/null 2>&1; then
