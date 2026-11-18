@@ -10,8 +10,6 @@
 
 ```sh
 cp .env.example .env
-mkdir -p "$HOME/.config/agent-docker/proxy"
-cp allowed-domains.example "$HOME/.config/agent-docker/proxy/allowed-domains"
 id -u
 id -g
 ```
@@ -21,10 +19,10 @@ id -g
 | Параметр | Значение |
 | --- | --- |
 | `PROJECTS_DIR` | Абсолютный путь к существующему каталогу проектов. В контейнере это `/workspace`, доступный на запись. |
-| `PROXY_CONFIG_DIR` | Абсолютный путь к созданной папке с `allowed-domains`. Держите её вне `PROJECTS_DIR`. |
+| `PROXY_CONFIG_DIR` | Абсолютный путь к папке с правилами Tinyproxy, например `$HOME/.config/agent-docker/proxy`. Держите её вне `PROJECTS_DIR`. |
 | `AGENT_UID`, `AGENT_GID` | На Linux подставьте значения `id -u` и `id -g` пользователя, которому принадлежат проекты. |
 
-Добавьте `registry.npmjs.org` в `allowed-domains` и запустите команду для нужного CLI:
+Запустите команду для нужного CLI:
 
 ```sh
 make init-claude
@@ -34,7 +32,7 @@ make init-claude
 make init-codex
 ```
 
-Для установки обоих CLI выполните `make init`. Каждая команда автоматически запускает Compose и выводит версию установленного CLI. Чтобы проверить состояние сервисов, выполните:
+Для установки обоих CLI выполните `make init`. Команды создают `PROXY_CONFIG_DIR` и копируют в неё `allowed-domains` из шаблона, если файла ещё нет. Шаблон разрешает `registry.npmjs.org` для установки. Если у вас есть свой список, добавьте этот домен перед установкой и перезапустите `proxy`, если он уже работает. После установки команда выводит версию CLI. Чтобы проверить состояние сервисов, выполните:
 
 ```sh
 docker compose ps
