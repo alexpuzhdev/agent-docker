@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -27,8 +28,10 @@ IDENTITY = {
 }
 SNAPSHOT_DATE = '946684800 +0000'
 EXCLUDED_ROOTS = {'.github', '.gitlab'}
-EXCLUDED_FILES = {'.gitmodules', '.mailmap', '.git-blame-ignore-revs'}
+EXCLUDED_FILES = {'.gitmodules', '.gitlab-ci.yml', '.mailmap', '.git-blame-ignore-revs'}
 MAX_COMMITS = 100
+MAX_PUSH_SIZE = '256m'
+GITLINK = b'160000'
 ZERO = '0' * 40
 
 
@@ -78,7 +81,7 @@ def remote_env(config):
     if REMOTE:
         return REMOTE, clean_env()
     credentials = base64.b64encode(f'{USERNAME}:{config["token"]}'.encode()).decode()
-    options = [('http.proxy', UPSTREAM.read_text().strip()),
+    options = [('http.proxy', UPSTREAM.read_text().strip()), ('http.followRedirects', 'false'),
                ('http.extraHeader', f'Authorization: Basic {credentials}'), ('credential.helper', '')]
     env = clean_env(GIT_CONFIG_COUNT=str(len(options)))
     for index, (key, value) in enumerate(options):
@@ -123,7 +126,8 @@ def prepare():
     if not CLEAN.exists():
         git(ROOT, 'init', '-q', '--bare', f'--initial-branch={READ_BRANCH}', str(CLEAN))
         for key, value in (('http.receivepack', 'true'), ('receive.denyDeletes', 'true'),
-                           ('receive.denyNonFastForwards', 'true'), ('core.hooksPath', str(ROOT / 'hooks'))):
+                           ('receive.denyNonFastForwards', 'true'), ('receive.maxInputSize', MAX_PUSH_SIZE),
+                           ('core.hooksPath', str(ROOT / 'hooks'))):
             git(CLEAN, 'config', key, value)
     hooks = ROOT / 'hooks'
     hooks.mkdir(exist_ok=True)
@@ -153,6 +157,8 @@ def upstream_heads(config, branch):
 
 def fetch(config, branch):
     head, write = upstream_heads(config, branch)
+    if ref(SOURCE, 'refs/source/head') == head and (not write or ref(SOURCE, 'refs/source/write') == write):
+        return head, write
     url, env = remote_env(config)
     refspecs = ['+HEAD:refs/source/head'] + ([f'+refs/heads/{branch}:refs/source/write'] if write else [])
     git(SOURCE, 'fetch', '-q', '--no-tags', '--depth=1', url, *refspecs, env=env)
@@ -165,8 +171,12 @@ def sanitized_tree(commit):
     with tempfile.TemporaryDirectory(dir=ROOT / 'tmp') as scratch:
         env = clean_env(GIT_INDEX_FILE=f'{scratch}/index', GIT_WORK_TREE=scratch)
         git(SOURCE, 'read-tree', commit, env=env)
-        names = git(SOURCE, 'ls-files', '-z', env=env).stdout.split(b'\0')
-        drop = [name for name in names if name and excluded(name.decode('utf-8', 'surrogateescape'))]
+        drop = []
+        for entry in git(SOURCE, 'ls-files', '-s', '-z', env=env).stdout.split(b'\0'):
+            if entry:
+                info, name = entry.split(b'\t', 1)
+                if info.startswith(GITLINK) or excluded(name.decode('utf-8', 'surrogateescape')):
+                    drop.append(name)
         if drop:
             git(SOURCE, 'update-index', '--force-remove', '-z', '--stdin', env=env, input=b'\0'.join(drop) + b'\0')
         return output(SOURCE, 'write-tree', env=env)
@@ -182,11 +192,20 @@ def publish(name, tree, parent):
     return commit
 
 
+def settled_tip(name, expected):
+    for _ in range(50):
+        tip = ref(CLEAN, f'refs/heads/{name}')
+        if tip == expected:
+            break
+        time.sleep(0.1)
+    return tip
+
+
 def sync_branch(state, name, upstream, base):
     entry = state['branches'].get(name)
-    if entry and entry['upstream'] == upstream and entry['base'] == base:
+    tip = settled_tip(name, entry['clean']) if entry else ref(CLEAN, f'refs/heads/{name}')
+    if entry and entry['upstream'] == upstream and entry['base'] == base and entry['clean'] == tip:
         return
-    tip = ref(CLEAN, f'refs/heads/{name}')
     tree = sanitized_tree(base)
     if tip and output(CLEAN, 'rev-parse', tip + '^{tree}') == tree:
         commit = tip
@@ -207,9 +226,10 @@ def sync():
             entry = state['branches'].get(branch)
             if write:
                 sync_branch(state, branch, write, write)
-            elif not entry or entry['upstream'] is not None:
+            elif not entry or entry['upstream'] is not None or settled_tip(branch, entry['clean']) != entry['clean']:
                 main = state['branches'][READ_BRANCH]['clean']
                 git(CLEAN, 'update-ref', f'refs/heads/{branch}', main)
+                git(SOURCE, 'update-ref', f'refs/source/base/{branch}', head)
                 state['branches'][branch] = {'upstream': None, 'base': head, 'clean': main}
         save_state(state)
 
@@ -234,10 +254,13 @@ def export(config, state, old, new):
     tip = entry['base']
     for commit in commits:
         parent = output(CLEAN, 'rev-parse', commit + '^', env=hook)
-        names = git(CLEAN, 'diff-tree', '-r', '--no-renames', '--name-only', '-z', parent, commit, env=hook).stdout
-        if any(excluded(name.decode('utf-8', 'surrogateescape')) for name in names.split(b'\0') if name):
-            raise Refused('Изменение служебных файлов репозитория не разрешено.')
-        patch = git(CLEAN, 'diff', '--binary', '--full-index', '--no-renames', parent, commit, env=hook).stdout
+        changes = git(CLEAN, 'diff-tree', '-r', '--no-renames', '-z', parent, commit, env=hook).stdout.split(b'\0')
+        for info, name in zip(changes[0::2], changes[1::2]):
+            modes = info.lstrip(b':').split(b' ')[:2]
+            if GITLINK in modes or excluded(name.decode('utf-8', 'surrogateescape')):
+                raise Refused('Изменение служебных файлов и подмодулей репозитория не разрешено.')
+        patch = git(CLEAN, 'diff-tree', '-p', '--binary', '--full-index', '--no-renames', '--no-ext-diff',
+                    '--no-textconv', parent, commit, env=hook).stdout
         message = git(CLEAN, 'log', '-1', '--format=%B', commit, env=hook).stdout
         with tempfile.TemporaryDirectory(dir=ROOT / 'tmp') as scratch:
             index = clean_env(GIT_INDEX_FILE=f'{scratch}/index', GIT_WORK_TREE=scratch)

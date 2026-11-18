@@ -32,9 +32,11 @@ class GitMirrorTest(unittest.TestCase):
         self.write(self.owner, {
             'README.md': 'Проект\n', 'src/app.py': 'print(1)\n', '.github/workflows/ci.yml': 'on: push\n',
             'docs/CODEOWNERS': '* @ivan-petrov\n', '.mailmap': 'Ivan <ivan.petrov@corp.example>\n',
-            '.gitmodules': '[submodule "x"]\n\turl = https://corp.example/x.git\n',
+            '.gitmodules': '[submodule "x"]\n\turl = https://corp.example/x.git\n', '.gitlab-ci.yml': 'job: {}\n',
         })
         (self.owner / 'data.bin').write_bytes(bytes(range(256)) * 4)
+        self.git(self.owner, 'add', '-A')
+        self.git(self.owner, 'update-index', '--add', '--cacheinfo', '160000,' + 'a' * 40 + ',vendor/lib')
         self.commit(self.owner, 'Merge pull request #7 from ivan-petrov/secret-feature', OWNER)
         self.git(self.owner, 'push', '-q', 'origin', 'main')
         self.configure(write=False)
@@ -196,11 +198,35 @@ class GitMirrorTest(unittest.TestCase):
         self.git(guest, 'reset', '-q', '--hard', base)
         self.write(guest, {'other.txt': 'other\n'})
         self.commit(guest, 'other', GUEST)
-        for refspec, expected in ((':agent/work', 'remote'), ('HEAD:main', 'назначенную ветку')):
+        for refspec, expected in ((':agent/work', 'Создание и удаление веток не разрешено'), ('HEAD:main', 'назначенную ветку')):
             result = self.push(guest, refspec, check=False)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(expected, result.stderr)
+        self.git(guest, 'reset', '-q', '--hard', base)
+        self.git(guest, 'update-index', '--add', '--cacheinfo', '160000,' + 'b' * 40 + ',vendor/guest')
+        self.git(guest, 'commit', '-q', '-m', 'gitlink', env=GUEST)
+        result = self.push(guest, 'HEAD:agent/work', check=False)
+        self.assertIn('подмодулей', result.stderr)
         self.assertEqual(self.git(self.upstream, 'ls-remote', '--heads', '.').stdout.count('\n'), 1)
+        self.assertEqual(self.git(self.mirror / 'clean.git', 'config', 'receive.maxInputSize').stdout.strip(), '256m')
+
+    def test_lost_ref_update_recovers_on_next_sync(self):
+        self.configure(write=True, branch='agent/work')
+        self.sync()
+        guest = self.guest_clone('agent/work')
+        before = self.git(guest, 'rev-parse', 'HEAD').stdout.strip()
+        self.write(guest, {'src/app.py': 'print("lost")\n'})
+        self.commit(guest, 'lost ref', GUEST)
+        self.push(guest, 'HEAD:agent/work')
+        self.git(self.mirror / 'clean.git', 'update-ref', 'refs/heads/agent/work', before)
+        self.sync()
+        self.git(guest, 'pull', '-q', '--rebase', env=GUEST)
+        self.assertEqual((guest / 'src/app.py').read_text(), 'print("lost")\n')
+        self.write(guest, {'next.txt': 'next\n'})
+        self.commit(guest, 'after recovery', GUEST)
+        self.push(guest, 'HEAD:agent/work')
+        self.assertEqual([line.split('|')[1] for line in self.upstream_log('agent/work')[:2]],
+                         ['after recovery', 'lost ref'])
 
     def test_upstream_change_requires_rebase(self):
         self.configure(write=True, branch='agent/work')

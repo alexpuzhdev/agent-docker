@@ -59,7 +59,7 @@ function respond(backend, outgoing) {
         header = Buffer.concat([header, chunk]);
         const separator = header.indexOf('\r\n\r\n');
         if (separator < 0) {
-            if (header.length > 65536) backend.kill();
+            if (header.length > 65536) backend.stdout.destroy();
             return;
         }
         backend.stdout.removeListener('data', receive);
@@ -103,6 +103,10 @@ function createGitHandler(path = process.env.GIT_MIRROR_CONFIG ?? configPath,
         if (route.requestType && incoming.headers['content-type'] !== route.requestType) {
             return outgoing.writeHead(415).end();
         }
+        const encoding = incoming.headers['content-encoding'];
+        if (route.operation === 'git-receive-pack' && encoding && encoding !== 'identity') {
+            return outgoing.writeHead(415).end();
+        }
         if (incoming.method === 'GET' && !(await sync(root))) {
             return outgoing.writeHead(502).end();
         }
@@ -123,23 +127,36 @@ function createGitHandler(path = process.env.GIT_MIRROR_CONFIG ?? configPath,
                 REMOTE_ADDR: '127.0.0.1',
             },
             stdio: ['pipe', 'pipe', 'ignore'],
-            timeout: 600000,
+            detached: true,
+        });
+        let exited = false;
+        const stop = () => {
+            if (exited) return;
+            try {
+                process.kill(-backend.pid, 'SIGKILL');
+            } catch {}
+        };
+        const deadline = setTimeout(stop, 600000);
+        backend.on('exit', () => {
+            exited = true;
+            clearTimeout(deadline);
         });
         backend.on('error', () => {
             if (!outgoing.headersSent) outgoing.writeHead(502).end();
             else outgoing.destroy();
         });
-        outgoing.on('close', () => backend.kill());
+        outgoing.on('close', stop);
         let received = 0;
         incoming.on('data', chunk => {
             received += chunk.length;
             if (received > maxRequestBytes) {
                 incoming.destroy();
-                backend.kill();
+                stop();
             }
         });
-        incoming.on('error', () => backend.kill());
-        backend.stdin.on('error', () => backend.kill());
+        incoming.on('error', stop);
+        backend.stdin.on('error', stop);
+        backend.stdout.on('error', stop);
         incoming.pipe(backend.stdin);
         respond(backend, outgoing);
     };
