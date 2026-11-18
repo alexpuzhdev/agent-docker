@@ -2,11 +2,13 @@ const fs = require('node:fs');
 const http = require('node:http');
 const net = require('node:net');
 const { connect, readUpstream } = require('./upstream.cjs');
+const { createGitHandler, gitHost } = require('./git-gateway.cjs');
 
 const upstream = readUpstream('/config/upstream');
 const domains = new Set(fs.readFileSync('/config/allowed-domains', 'utf8')
     .split('\n').map(line => line.split('#', 1)[0].trim().toLowerCase()).filter(Boolean));
 const listen = process.env.GATEWAY_IP;
+const handleGit = createGitHandler(upstream);
 
 function sniFromHello(hello) {
     try {
@@ -78,6 +80,7 @@ net.createServer(client => {
 
 http.createServer((incoming, outgoing) => {
     const host = (incoming.headers.host || '').toLowerCase();
+    if (host === gitHost) return handleGit(incoming, outgoing);
     if (!domains.has(host) || !incoming.url.startsWith('/') || incoming.url.startsWith('//')) {
         outgoing.writeHead(403).end();
         return;

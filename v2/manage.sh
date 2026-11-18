@@ -18,7 +18,10 @@ value() {
 }
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 positive() { [[ $1 =~ ^[1-9][0-9]{0,5}$ ]]; }
-compose() { docker compose --project-name "$project_prefix-$VM_NAME" -f "$root/v2/compose.yaml" "$@"; }
+compose() {
+    mkdir -p "$VM_STATE/git"
+    docker compose --project-name "$project_prefix-$VM_NAME" -f "$root/v2/compose.yaml" "$@"
+}
 set_name() {
     VM_NAME=$1
     [[ $VM_NAME =~ ^vm-([0-9]{2,3})$ ]] || fail 'Выберите VM в формате vm-01.'
@@ -86,6 +89,68 @@ configure_proxy() (
     ensure_base_image "$candidate"
     verify_proxy "$candidate"
     mv -f "$candidate" "$VM_STATE/upstream"
+)
+git_settings() {
+    repository=${REPO:-}
+    mode=${GIT_WRITE:-0}
+    branch=${GIT_WRITE_BRANCH:-}
+    [[ $repository =~ ^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}/[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$ && $repository != *.git ]] ||
+        fail 'Укажите GitHub-репозиторий как REPO=owner/name.'
+    [[ $mode = 0 || $mode = 1 ]] || fail 'Укажите GIT_WRITE=0 или GIT_WRITE=1.'
+    if [[ $mode = 1 ]]; then
+        [[ ${#branch} -le 120 && $branch != main && $branch != master &&
+            $branch =~ ^([a-zA-Z0-9][a-zA-Z0-9_-]*/)*[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] ||
+            fail 'Для записи укажите отдельную ветку через GIT_WRITE_BRANCH, например test/gateway-write.'
+    else
+        branch=''
+    fi
+    writable=false
+    if [[ $mode = 1 ]]; then writable=true; fi
+}
+write_git_config() (
+    local token candidate
+    if ! IFS= read -rs -p "Отдельный токен GitHub для $repository: " token </dev/tty; then
+        fail 'Для настройки Git нужен интерактивный терминал.'
+    fi
+    printf '\n' >&2
+    [[ $token =~ ^[a-zA-Z0-9_-]{10,512}$ ]] || fail 'Недопустимый формат токена GitHub.'
+    mkdir -p "$VM_STATE/git"
+    candidate=$(mktemp "$VM_STATE/git/.repository.XXXXXX")
+    trap 'rm -f -- "$candidate"' EXIT
+    printf '{"repository":"%s","token":"%s","write":%s,"writeBranch":"%s"}\n' "$repository" "$token" "$writable" "$branch" > "$candidate"
+    if [[ ${1:-} = create ]]; then
+        ln -T -- "$candidate" "$VM_STATE/git/repository.json" ||
+            fail "Git-шлюз $VM_NAME уже настроен параллельной командой. Повторите vm-setup."
+    else
+        mv -f -- "$candidate" "$VM_STATE/git/repository.json"
+    fi
+    printf 'Git-шлюз настроен для %s. Адрес в госте: http://git.agent-docker.test/project.git\n' "$VM_NAME"
+)
+configure_git() (
+    configured
+    local repository mode branch writable
+    git_settings
+    write_git_config
+)
+setup_git() (
+    local repository mode branch writable current update
+    git_settings
+    update="make vm-git VM=$VM_NAME REPO=$repository"
+    if [[ $writable = true ]]; then update+=" GIT_WRITE=1 GIT_WRITE_BRANCH=$branch"; fi
+    if ! test -e "$VM_STATE/git/repository.json"; then
+        write_git_config create
+        return
+    fi
+    if ! current=$(docker run --rm --pull never --network none \
+        --mount "type=bind,src=$root/v2,dst=/scripts,readonly" \
+        --mount "type=bind,src=$VM_STATE/git/repository.json,dst=/repository.json,readonly" \
+        "$base_image" node /scripts/git-gateway.cjs --settings /repository.json); then
+        fail "Не удалось прочитать сохранённую настройку Git-шлюза $VM_NAME. Задайте её заново: $update"
+    fi
+    if [[ $current != "$repository $writable $branch" ]]; then
+        fail "Для $VM_NAME уже настроен Git-шлюз с другим репозиторием или режимом записи. Сохранённая настройка не изменена. Чтобы заменить её, выполните: $update"
+    fi
+    printf 'Git-шлюз %s уже настроен для %s. Сохранённая настройка используется без изменений.\n' "$VM_NAME" "$repository"
 )
 build_image() {
     local source_hash existing proxy
@@ -164,6 +229,7 @@ setup() {
     docker run --rm --pull never --network none --cap-drop ALL --device /dev/kvm:/dev/kvm:rw \
         "$base_image" node -e 'require("node:fs").closeSync(require("node:fs").openSync("/dev/kvm", "r+"))' ||
         fail 'Docker не может открыть /dev/kvm.'
+    if test -n "${REPO:-}"; then setup_git; fi
     build_image
     prepare_base
     if vm_running && compose exec -T vm sh -c 'grep -aFq "agent-docker-prepare.service: Failed" /guest/console.log'; then
@@ -182,6 +248,7 @@ ensure_docker
 set_name "${VM:-vm-01}"
 case "$target" in
     vm-setup|init-claude) setup ;;
+    vm-git) configure_git ;;
     vm-proxy)
         configure_proxy
         if test -f "$VM_STATE/resources" && docker image inspect "$image" >/dev/null 2>&1; then

@@ -12,6 +12,7 @@ services:
       GATEWAY_IP: ${GATEWAY_IP:?}
     volumes:
       - ${VM_STATE:?}/upstream:/config/upstream:ro
+      - ${VM_STATE:?}/git:/config/git:ro
       - ${VM_STATE:?}/allowed-domains:/config/allowed-domains:ro
     networks:
       private:
@@ -21,12 +22,12 @@ services:
   vm:
     image: agent-docker-v2:local
     pull_policy: never
-    init: true
     cap_drop: [ALL]
+    cap_add: [NET_ADMIN, SETPCAP]
     security_opt: [no-new-privileges:true]
     devices:
       - /dev/kvm:/dev/kvm:rw
-    command: ["bash", "/opt/agent-docker/guest.sh"]
+    command: ["bash", "/opt/agent-docker/start-vm.sh"]
     environment:
       VM_NAME: ${VM_NAME:?}
       VCPU: ${VM_CONFIG_VCPU:?}

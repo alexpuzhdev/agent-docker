@@ -8,7 +8,7 @@ seed = Path('/guest/seed')
 seed.mkdir(exist_ok=True)
 name = os.environ['VM_NAME']
 ip = str(ipaddress.IPv4Address(os.environ['GATEWAY_IP']))
-hosts = []
+hosts = [f'{ip} git.agent-docker.test\n']
 for line in Path('/config/allowed-domains').read_text().splitlines():
     domain = line.partition('#')[0].strip().lower()
     if not domain:
