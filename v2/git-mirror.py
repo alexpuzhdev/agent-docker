@@ -294,7 +294,8 @@ def sync():
             entry = state['branches'].get(WORK_BRANCH)
             if write:
                 sync_branch(state, WORK_BRANCH, write, write)
-            elif not entry or entry['upstream'] is not None or settled_tip(WORK_BRANCH, entry['clean']) != entry['clean']:
+            elif (not entry or entry['upstream'] is not None or entry['base'] != head or
+                  settled_tip(WORK_BRANCH, entry['clean']) != entry['clean']):
                 main = state['branches'][READ_BRANCH]['clean']
                 git(CLEAN, 'update-ref', f'refs/heads/{WORK_BRANCH}', main)
                 git(SOURCE, 'update-ref', 'refs/source/base', head)
@@ -326,9 +327,11 @@ def export(config, state, old, new):
     if output(CLEAN, 'rev-list', '--min-parents=2', f'{old}..{new}', env=hook):
         raise Refused('Коммиты слияния не принимаются. Используйте git pull --rebase.')
     url, env = remote_env(config)
-    current = upstream_heads(config, branch)[1]
+    head, current = upstream_heads(config, branch)
     if current != entry['upstream']:
         raise Refused('Ветка изменилась. Выполните git pull --rebase и повторите push.')
+    if current is None and head != entry['base']:
+        raise Refused('Основная ветка обновилась. Выполните git pull --rebase и повторите push.')
     tip = entry['base']
     for commit in commits:
         parent = output(CLEAN, 'rev-parse', commit + '^', env=hook)
