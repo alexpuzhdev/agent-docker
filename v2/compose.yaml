@@ -19,6 +19,7 @@ services:
     volumes:
       - ${VM_STATE:?}/upstream:/config/upstream:ro
       - ${VM_STATE:?}/git:/config/git:ro
+      - ${VM_STATE:?}/git-mirror:/mirror
       - ${VM_STATE:?}/allowed-domains:/config/allowed-domains:ro
     networks:
       private:

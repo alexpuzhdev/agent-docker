@@ -9,7 +9,7 @@ const upstream = readUpstream('/config/upstream');
 const domains = new Set(fs.readFileSync('/config/allowed-domains', 'utf8')
     .split('\n').map(line => line.split('#', 1)[0].trim().toLowerCase()).filter(Boolean));
 const listen = process.env.GATEWAY_IP;
-const handleGit = createGitHandler(upstream);
+const handleGit = createGitHandler();
 const logSni = createSniLog(process.env.GATEWAY_SNI_LOG === '1');
 
 function sniFromHello(hello) {

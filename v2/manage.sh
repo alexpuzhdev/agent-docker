@@ -19,7 +19,7 @@ value() {
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 positive() { [[ $1 =~ ^[1-9][0-9]{0,5}$ ]]; }
 compose() {
-    mkdir -p "$VM_STATE/git"
+    mkdir -p "$VM_STATE/git" "$VM_STATE/git-mirror"
     docker compose --project-name "$project_prefix-$VM_NAME" -f "$root/v2/compose.yaml" "$@"
 }
 set_name() {

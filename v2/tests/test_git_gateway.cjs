@@ -1,149 +1,93 @@
 const assert = require('node:assert/strict');
-const { execFile, spawn } = require('node:child_process');
+const { execFile } = require('node:child_process');
 const fs = require('node:fs/promises');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
 const { promisify } = require('node:util');
-const { createGitHandler } = require('../git-gateway.cjs');
 
-const git = promisify(execFile);
+const run = promisify(execFile);
 const token = 'fixture_token_only';
-const originRepository = 'owner/source';
+const owner = ['-c', 'user.name=Ivan Petrov', '-c', 'user.email=ivan.petrov@corp.example'];
+const guest = ['-c', 'user.name=Guest Agent', '-c', 'user.email=guest@vm.invalid'];
 
 function listen(server) {
     return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
 
-function mockOrigin(root, observed, redirect) {
-    return http.createServer((incoming, outgoing) => {
-        const url = new URL(incoming.url, 'http://localhost');
-        observed.push({ path: url.pathname, authorization: incoming.headers.authorization });
-        if (redirect()) {
-            return outgoing.writeHead(302, { Location: 'https://example.invalid/' }).end(token);
-        }
-        const backend = spawn('git', ['http-backend'], {
-            env: {
-                ...process.env,
-                GIT_PROJECT_ROOT: root,
-                GIT_HTTP_EXPORT_ALL: '1',
-                PATH_INFO: url.pathname,
-                REQUEST_METHOD: incoming.method,
-                QUERY_STRING: url.search.slice(1),
-                CONTENT_TYPE: incoming.headers['content-type'] ?? '',
-                CONTENT_LENGTH: incoming.headers['content-length'] ?? '',
-                HTTP_GIT_PROTOCOL: incoming.headers['git-protocol'] ?? '',
-                REMOTE_USER: 'fixture',
-            },
-        });
-        const chunks = [];
-        incoming.pipe(backend.stdin);
-        backend.stdout.on('data', chunk => chunks.push(chunk));
-        backend.stderr.resume();
-        backend.on('close', code => {
-            if (code !== 0) return outgoing.writeHead(500).end();
-            const output = Buffer.concat(chunks);
-            const separator = output.indexOf('\r\n\r\n');
-            let status = 200;
-            for (const line of output.subarray(0, separator).toString().split('\r\n')) {
-                const index = line.indexOf(':');
-                const name = line.slice(0, index);
-                const value = line.slice(index + 1).trim();
-                if (name.toLowerCase() === 'status') status = Number(value.split(' ')[0]);
-                else outgoing.setHeader(name, value);
-            }
-            outgoing.writeHead(status).end(output.subarray(separator + 4));
-        });
-    });
-}
-
-test('clone and fetch use one repository, while push requires explicit write access', async t => {
+test('guest sees an anonymous snapshot and pushes only to the assigned branch', async t => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-git-test-'));
     t.after(() => fs.rm(root, { recursive: true, force: true }));
     const config = path.join(root, 'repository.json');
-    const originPath = path.join(root, 'owner/source.git');
+    const upstream = path.join(root, 'upstream.git');
     const seed = path.join(root, 'seed');
     const copy = path.join(root, 'clone');
-    await fs.mkdir(path.join(root, 'owner'));
-    await git('git', ['init', '--bare', '--initial-branch=main', originPath]);
-    await git('git', ['init', '--initial-branch=main', seed]);
-    const commit = directory => git('git', ['-C', directory, '-c', 'user.name=Fixture',
-        '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'fixture commit']);
-    await commit(seed);
-    await git('git', ['-C', seed, 'push', originPath, 'main']);
+    process.env.GIT_CONFIG_NOSYSTEM = '1';
+    process.env.GIT_CONFIG_GLOBAL = '/dev/null';
+    process.env.GIT_MIRROR_ROOT = path.join(root, 'mirror');
+    process.env.GIT_MIRROR_CONFIG = config;
+    process.env.GIT_MIRROR_REMOTE = 'file://' + upstream;
+    const git = (...args) => run('git', args);
 
-    const requests = [];
-    let redirect = false;
-    const origin = mockOrigin(root, requests, () => redirect);
-    t.after(() => origin.close());
-    const originPort = await listen(origin);
-    const request = (options, callback) => {
-        assert.equal(options.hostname, 'github.com');
-        return http.request({ ...options, hostname: '127.0.0.1', port: originPort, agent: false }, callback);
-    };
-    const gateway = http.createServer(createGitHandler(null, config, request));
+    await git('init', '--bare', '--initial-branch=main', upstream);
+    await git('init', '--initial-branch=main', seed);
+    await fs.mkdir(path.join(seed, '.github'));
+    await fs.writeFile(path.join(seed, '.github', 'CODEOWNERS'), '* @ivan-petrov\n');
+    await fs.writeFile(path.join(seed, 'app.txt'), 'owner\n');
+    await git('-C', seed, 'add', '-A');
+    await git('-C', seed, ...owner, 'commit', '-m', 'Merge pull request #7 from ivan-petrov/feature');
+    await git('-C', seed, 'push', upstream, 'main');
+
+    const { createGitHandler } = require('../git-gateway.cjs');
+    const gateway = http.createServer(createGitHandler(config, process.env.GIT_MIRROR_ROOT));
     t.after(() => gateway.close());
-    const gatewayPort = await listen(gateway);
-    const gatewayUrl = 'http://127.0.0.1:' + gatewayPort;
-    const remote = gatewayUrl + '/project.git';
+    const base = 'http://127.0.0.1:' + await listen(gateway);
+    const remote = base + '/project.git';
     const updateConfig = (write, writeBranch) => fs.writeFile(config, JSON.stringify({
-        repository: originRepository, write, token, writeBranch,
+        repository: 'owner/source', write, token, writeBranch,
     }));
 
     assert.equal((await fetch(remote + '/info/refs?service=git-upload-pack')).status, 404);
     await updateConfig(false);
-    await git('git', ['clone', remote, copy]);
-    await git('git', ['-C', copy, 'fetch', 'origin']);
-    assert.ok(requests.some(r => r.path === '/owner/source.git/git-upload-pack'));
-    const priorRequestCount = requests.length;
-    assert.equal((await fetch(gatewayUrl + '/alien.git/info/refs?service=git-upload-pack')).status, 404);
-    await commit(copy);
-    await assert.rejects(git('git', ['-C', copy, 'push', 'origin', 'main']), /403/);
-    assert.equal(requests.length, priorRequestCount);
-
-    const advertisement = await fetch(remote + '/info/refs?service=git-upload-pack', {
-        headers: { Authorization: 'Basic guest-supplied' },
-    });
+    assert.equal((await fetch(base + '/alien.git/info/refs?service=git-upload-pack')).status, 404);
+    await git('clone', remote, copy);
+    const log = await git('-C', copy, 'log', '--format=%an <%ae>|%s');
+    assert.equal(log.stdout, 'agent-docker <agent-docker@localhost>|Снимок репозитория\n');
+    assert.deepEqual((await git('-C', copy, 'ls-files')).stdout.split('\n').filter(Boolean), ['app.txt']);
+    const advertisement = await fetch(remote + '/info/refs?service=git-upload-pack');
     assert.equal(advertisement.status, 200);
-    assert.equal(advertisement.headers.get('authorization'), null);
-    assert.ok(!(await advertisement.text()).includes(token));
+    const allowed = new Set(['cache-control', 'connection', 'content-type', 'date', 'keep-alive', 'transfer-encoding']);
+    for (const name of advertisement.headers.keys()) assert.ok(allowed.has(name), name);
+    const listing = await advertisement.text();
+    assert.ok(!listing.includes('github') && !listing.includes('pull') && !listing.includes(token));
 
-    await updateConfig(true);
+    await fs.writeFile(path.join(copy, 'app.txt'), 'guest\n');
+    await git('-C', copy, ...guest, 'commit', '-am', 'Правка агента');
     assert.equal((await fetch(remote + '/info/refs?service=git-receive-pack')).status, 403);
-    assert.equal((await fetch(remote + '/info/refs?service=git-upload-pack')).status, 200);
-    await updateConfig(true, 'main');
-    assert.equal((await fetch(remote + '/info/refs?service=git-receive-pack')).status, 403);
-    await updateConfig(true, 'test/gateway-write');
-    const writeRequests = () => requests.filter(r => r.path === '/owner/source.git/git-receive-pack').length;
-    const beforeDenied = writeRequests();
-    await assert.rejects(git('git', ['-C', copy, 'push', 'origin', 'main']), /403/);
-    await assert.rejects(git('git', ['-C', copy, 'push', 'origin', 'HEAD:refs/tags/prohibited']), /403/);
-    await assert.rejects(git('git', ['-C', copy, 'push', 'origin', 'main', 'HEAD:refs/heads/test/gateway-write']), /403/);
+    await assert.rejects(git('-C', copy, 'push', 'origin', 'HEAD:refs/heads/agent/work'), /403/);
     const receivePack = remote + '/git-receive-pack';
-    const packetHeaders = { 'Content-Type': 'application/x-git-receive-pack-request' };
-    assert.equal((await fetch(receivePack, { method: 'POST', headers: packetHeaders, body: '0001' })).status, 403);
     assert.equal((await fetch(receivePack, {
-        method: 'POST', headers: { ...packetHeaders, 'Content-Encoding': 'gzip' }, body: '0000',
+        method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '0000',
+    })).status, 403);
+
+    await updateConfig(true, 'agent/work');
+    assert.equal((await fetch(receivePack, {
+        method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '0000',
     })).status, 415);
-    assert.equal(writeRequests(), beforeDenied);
-    await git('git', ['-C', copy, 'push', 'origin', 'HEAD:refs/heads/test/gateway-write']);
-    const pushed = await git('git', ['-C', originPath, 'rev-parse', 'test/gateway-write']);
-    const local = await git('git', ['-C', copy, 'rev-parse', 'main']);
-    assert.equal(pushed.stdout, local.stdout);
-    const afterPush = writeRequests();
-    await assert.rejects(git('git', ['-C', copy, 'push', 'origin', ':refs/heads/test/gateway-write']), /403/);
-    assert.equal(writeRequests(), afterPush);
-    assert.equal((await git('git', ['-C', originPath, 'rev-parse', 'main'])).stdout,
-        (await git('git', ['-C', seed, 'rev-parse', 'main'])).stdout);
-    assert.ok(requests.some(r => r.path === '/owner/source.git/git-receive-pack'));
+    await git('-C', copy, 'fetch', 'origin');
+    await git('-C', copy, ...guest, 'rebase', 'origin/agent/work');
+    await assert.rejects(git('-C', copy, 'push', 'origin', 'HEAD:main'), /назначенную ветку/);
+    await git('-C', copy, 'push', 'origin', 'HEAD:refs/heads/agent/work');
+    const exported = await git('-C', upstream, 'log', '--format=%an <%ae>|%s', 'agent/work');
+    assert.equal(exported.stdout.split('\n')[0], 'agent-docker <agent-docker@localhost>|Правка агента');
+    assert.equal((await git('-C', upstream, 'show', 'agent/work:.github/CODEOWNERS')).stdout, '* @ivan-petrov\n');
+    assert.equal((await git('-C', upstream, 'show', 'agent/work:app.txt')).stdout, 'guest\n');
+    assert.equal((await git('-C', upstream, 'log', '--format=%ae', '--all')).stdout.includes('guest@vm.invalid'), false);
+    await assert.rejects(git('-C', copy, 'push', 'origin', ':refs/heads/agent/work'));
 
-    redirect = true;
-    const blocked = await fetch(remote + '/info/refs?service=git-upload-pack');
-    assert.equal(blocked.status, 502);
-    assert.equal(blocked.headers.get('location'), null);
-    assert.equal(await blocked.text(), '');
-
-    assert.ok(requests.every(r => r.authorization === 'Basic ' +
-        Buffer.from('x-access-token:' + token).toString('base64')));
+    process.env.GIT_MIRROR_REMOTE = 'file://' + path.join(root, 'missing.git');
+    const failed = await fetch(remote + '/info/refs?service=git-upload-pack');
+    assert.equal(failed.status, 502);
+    assert.equal(await failed.text(), '');
 });
