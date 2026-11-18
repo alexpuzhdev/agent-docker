@@ -4,7 +4,7 @@ ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git \
+    && apt-get install -y --no-install-recommends ca-certificates curl git python3 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN test "${AGENT_UID}" -gt 0 \
