@@ -1,0 +1,61 @@
+services:
+  proxy:
+    image: agent-docker-v2:local
+    pull_policy: never
+    user: "${HOST_UID:?}:${HOST_GID:?}"
+    init: true
+    cap_drop: [ALL]
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    command: ["node", "/opt/agent-docker/gateway.cjs"]
+    environment:
+      GATEWAY_IP: ${GATEWAY_IP:?}
+    volumes:
+      - ${VM_STATE:?}/upstream:/config/upstream:ro
+      - ${VM_STATE:?}/allowed-domains:/config/allowed-domains:ro
+    networks:
+      private:
+        ipv4_address: ${GATEWAY_IP:?}
+      egress: {}
+
+  vm:
+    image: agent-docker-v2:local
+    pull_policy: never
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    devices:
+      - /dev/kvm:/dev/kvm:rw
+    command: ["bash", "/opt/agent-docker/guest.sh"]
+    environment:
+      VM_NAME: ${VM_NAME:?}
+      VCPU: ${VM_CONFIG_VCPU:?}
+      RAM_MB: ${VM_CONFIG_RAM:?}
+      DISK_GB: ${VM_CONFIG_DISK:?}
+      GATEWAY_IP: ${GATEWAY_IP:?}
+      CLAUDE_DOWNLOAD_HOST: downloads.claude.ai
+    volumes:
+      - guest:/guest
+      - base:/images:ro
+      - ${VM_STATE:?}/allowed-domains:/config/allowed-domains:ro
+    networks:
+      - private
+    depends_on:
+      - proxy
+
+networks:
+  private:
+    internal: true
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.inhibit_ipv4: "true"
+    ipam:
+      config:
+        - subnet: ${VM_SUBNET:?}
+  egress: {}
+
+volumes:
+  guest:
+  base:
+    external: true
+    name: ${V2_BASE_VOLUME:?}
