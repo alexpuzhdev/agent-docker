@@ -22,6 +22,8 @@ STATE = ROOT / 'state.json'
 ORIGIN = 'github.com'
 USERNAME = 'x-access-token'
 READ_BRANCH = 'main'
+WORK_BRANCH = 'work'
+LAYOUT = 2
 IDENTITY = {
     'GIT_AUTHOR_NAME': 'agent-docker', 'GIT_AUTHOR_EMAIL': 'agent-docker@localhost',
     'GIT_COMMITTER_NAME': 'agent-docker', 'GIT_COMMITTER_EMAIL': 'agent-docker@localhost',
@@ -105,7 +107,7 @@ def save_state(state):
 
 
 def load_state(config, reset=True):
-    key = {'repository': config['repository'], 'writeBranch': config['branch']}
+    key = {'layout': LAYOUT, 'repository': config['repository'], 'writeBranch': config['branch']}
     state = json.loads(STATE.read_text()) if STATE.exists() else None
     if state is None or state.get('key') != key:
         if not reset:
@@ -229,21 +231,21 @@ def sync():
         head, write = fetch(config, branch)
         sync_branch(state, READ_BRANCH, head, head)
         if branch:
-            entry = state['branches'].get(branch)
+            entry = state['branches'].get(WORK_BRANCH)
             if write:
-                sync_branch(state, branch, write, write)
-            elif not entry or entry['upstream'] is not None or settled_tip(branch, entry['clean']) != entry['clean']:
+                sync_branch(state, WORK_BRANCH, write, write)
+            elif not entry or entry['upstream'] is not None or settled_tip(WORK_BRANCH, entry['clean']) != entry['clean']:
                 main = state['branches'][READ_BRANCH]['clean']
-                git(CLEAN, 'update-ref', f'refs/heads/{branch}', main)
-                git(SOURCE, 'update-ref', f'refs/source/base/{branch}', head)
-                state['branches'][branch] = {'upstream': None, 'base': head, 'clean': main}
+                git(CLEAN, 'update-ref', f'refs/heads/{WORK_BRANCH}', main)
+                git(SOURCE, 'update-ref', 'refs/source/base', head)
+                state['branches'][WORK_BRANCH] = {'upstream': None, 'base': head, 'clean': main}
         save_state(state)
 
 
 def export(config, state, old, new):
     branch = config['branch']
     hook = dict(os.environ)
-    entry = state['branches'].get(branch)
+    entry = state['branches'].get(WORK_BRANCH)
     if not entry or entry['clean'] != old:
         raise Refused('Ветка изменилась. Выполните git pull --rebase и повторите push.')
     if git(CLEAN, 'merge-base', '--is-ancestor', old, new, env=hook, check=False).returncode:
@@ -279,7 +281,7 @@ def export(config, state, old, new):
     if git(SOURCE, 'push', '-q', url, f'{tip}:refs/heads/{branch}', lease, env=env, check=False).returncode:
         raise Refused('Репозиторий не принял изменения. Выполните git pull --rebase и повторите push.')
     git(SOURCE, 'update-ref', 'refs/source/write', tip)
-    state['branches'][branch] = {'upstream': tip, 'base': tip, 'clean': new}
+    state['branches'][WORK_BRANCH] = {'upstream': tip, 'base': tip, 'clean': new}
 
 
 def receive():
@@ -288,8 +290,8 @@ def receive():
     with locked():
         state = load_state(config, reset=False)
         branch = config['branch']
-        if not branch or len(updates) != 1 or updates[0][2] != f'refs/heads/{branch}':
-            raise Refused('Запись разрешена только в назначенную ветку, по одной ветке за push.')
+        if not branch or len(updates) != 1 or updates[0][2] != f'refs/heads/{WORK_BRANCH}':
+            raise Refused(f'Запись разрешена только в ветку {WORK_BRANCH}, по одной ветке за push.')
         old, new = updates[0][:2]
         if new == ZERO or old == ZERO:
             raise Refused('Создание и удаление веток не разрешено.')

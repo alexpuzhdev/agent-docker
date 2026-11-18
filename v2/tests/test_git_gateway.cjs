@@ -65,7 +65,7 @@ test('guest sees an anonymous snapshot and pushes only to the assigned branch', 
     await fs.writeFile(path.join(copy, 'app.txt'), 'guest\n');
     await git('-C', copy, ...guest, 'commit', '-am', 'Правка агента');
     assert.equal((await fetch(remote + '/info/refs?service=git-receive-pack')).status, 403);
-    await assert.rejects(git('-C', copy, 'push', 'origin', 'HEAD:refs/heads/agent/work'), /403/);
+    await assert.rejects(git('-C', copy, 'push', 'origin', 'HEAD:refs/heads/work'), /403/);
     const receivePack = remote + '/git-receive-pack';
     assert.equal((await fetch(receivePack, {
         method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '0000',
@@ -80,15 +80,16 @@ test('guest sees an anonymous snapshot and pushes only to the assigned branch', 
         headers: { 'Content-Type': 'application/x-git-receive-pack-request', 'Content-Encoding': 'gzip' },
     })).status, 415);
     await git('-C', copy, 'fetch', 'origin');
-    await git('-C', copy, ...guest, 'rebase', 'origin/agent/work');
-    await assert.rejects(git('-C', copy, 'push', 'origin', 'HEAD:main'), /назначенную ветку/);
-    await git('-C', copy, 'push', 'origin', 'HEAD:refs/heads/agent/work');
+    await git('-C', copy, ...guest, 'rebase', 'origin/work');
+    await assert.rejects(git('-C', copy, 'push', 'origin', 'HEAD:main'), /только в ветку work/);
+    await git('-C', copy, 'push', 'origin', 'HEAD:refs/heads/work');
+    assert.ok(!(await git('-C', copy, 'ls-remote', 'origin')).stdout.includes('agent/work'));
     const exported = await git('-C', upstream, 'log', '--format=%an <%ae>|%s', 'agent/work');
     assert.equal(exported.stdout.split('\n')[0], 'agent-docker <agent-docker@localhost>|Правка агента');
     assert.equal((await git('-C', upstream, 'show', 'agent/work:.github/CODEOWNERS')).stdout, '* @ivan-petrov\n');
     assert.equal((await git('-C', upstream, 'show', 'agent/work:app.txt')).stdout, 'guest\n');
     assert.equal((await git('-C', upstream, 'log', '--format=%ae', '--all')).stdout.includes('guest@vm.invalid'), false);
-    await assert.rejects(git('-C', copy, 'push', 'origin', ':refs/heads/agent/work'));
+    await assert.rejects(git('-C', copy, 'push', 'origin', ':refs/heads/work'));
 
     process.env.GIT_MIRROR_REMOTE = 'file://' + path.join(root, 'missing.git');
     const failed = await fetch(remote + '/info/refs?service=git-upload-pack');
