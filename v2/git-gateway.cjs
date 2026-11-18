@@ -7,7 +7,22 @@ const configPath = '/config/git/repository.json';
 const mirrorRoot = '/mirror';
 const mirrorScript = path.join(__dirname, 'git-mirror.py');
 const maxRequestBytes = 256 * 1024 * 1024;
-const repositoryPattern = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}\/[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/;
+const providers = {
+    github: {
+        field: 'repository',
+        suffix: /\.git$/,
+        repository: /^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}\/[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/,
+        token: /^[a-zA-Z0-9_-]{10,512}$/,
+    },
+    gitlab: {
+        field: 'project',
+        suffix: /\.(?:git|atom)$/,
+        repository: /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,254}(?:\/[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,254}){1,19}$/,
+        token: /^[a-zA-Z0-9_.-]{10,512}$/,
+    },
+};
+const github = 'https://github.com';
+const originPattern = /^https:\/\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*(?::[1-9][0-9]{0,4})?(?:\/[a-zA-Z0-9_~-][a-zA-Z0-9_.~-]*)*$/;
 const routes = new Map();
 
 for (const operation of ['git-upload-pack', 'git-receive-pack']) {
@@ -28,12 +43,22 @@ function isWritableBranch(branch) {
 
 function readRepository(path) {
     const config = JSON.parse(fs.readFileSync(path, 'utf8'));
-    if (typeof config?.repository !== 'string' || !repositoryPattern.test(config.repository) ||
-        config.repository.endsWith('.git') || typeof config.write !== 'boolean' ||
-        typeof config.token !== 'string' || !/^[a-zA-Z0-9_-]{10,512}$/.test(config.token)) {
+    if (typeof config !== 'object' || config === null || Array.isArray(config)) {
         throw new Error('Некорректная конфигурация Git-шлюза.');
     }
-    return config;
+    const provider = config.provider === undefined ? 'github' : config.provider;
+    const origin = config.origin === undefined && provider === 'github' ? github : config.origin;
+    const rules = typeof provider === 'string' && Object.hasOwn(providers, provider) ? providers[provider] : undefined;
+    const repository = rules ? config[rules.field] : undefined;
+    const foreign = rules ? ['repository', 'project'].filter(field => field !== rules.field && field in config) : [];
+    if (!rules || foreign.length || typeof repository !== 'string' || repository.length > 1024 ||
+        !rules.repository.test(repository) || rules.suffix.test(repository) ||
+        typeof config.write !== 'boolean' || typeof config.token !== 'string' || !rules.token.test(config.token) ||
+        typeof origin !== 'string' || origin.length > 512 || !originPattern.test(origin) ||
+        (provider === 'github') !== (origin === github)) {
+        throw new Error('Некорректная конфигурация Git-шлюза.');
+    }
+    return { ...config, provider, origin, repository };
 }
 
 function mirrorEnvironment(root) {
@@ -174,7 +199,7 @@ if (require.main === module) {
         const config = readRepository(process.argv[settings ? 3 : 2]);
         if (settings) {
             const branch = config.write && isWritableBranch(config.writeBranch) ? config.writeBranch : '';
-            console.log([config.repository, config.write, branch].join(' '));
+            console.log([config.provider, config.origin, config.repository, config.write, branch].join(' '));
         }
     } catch {
         console.error('Некорректный репозиторий, токен или режим записи Git-шлюза.');

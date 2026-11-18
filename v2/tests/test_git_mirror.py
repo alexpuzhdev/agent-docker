@@ -1,5 +1,7 @@
+import base64
 import fcntl
 import json
+import runpy
 import os
 import subprocess
 import sys
@@ -16,6 +18,8 @@ GUEST = {'GIT_AUTHOR_NAME': 'Guest Agent', 'GIT_AUTHOR_EMAIL': 'guest@vm.invalid
 OTHER = {'GIT_AUTHOR_NAME': 'Petr Sidorov', 'GIT_AUTHOR_EMAIL': 'petr@other.example',
          'GIT_COMMITTER_NAME': 'Petr Sidorov', 'GIT_COMMITTER_EMAIL': 'petr@other.example'}
 TOKEN = 'fixture_mirror_token_0004'
+GITLAB_TOKEN = 'glpat-fixture.mirror_token-0006'
+GITLAB_URL = 'https://gitlab.fixture-7c1e.invalid/scm'
 
 
 class GitMirrorTest(unittest.TestCase):
@@ -63,9 +67,17 @@ class GitMirrorTest(unittest.TestCase):
         self.git(repo, 'commit', '-q', '-m', message, env=identity)
         return self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
 
-    def configure(self, write, branch='', repository='owner/project'):
-        self.config.write_text(json.dumps({'repository': repository, 'token': TOKEN, 'write': write,
-                                           'writeBranch': branch}))
+    def configure(self, write, branch='', repository='owner/project', provider=None, origin=None, token=TOKEN):
+        field = 'project' if provider == 'gitlab' else 'repository'
+        config = {field: repository, 'token': token, 'write': write, 'writeBranch': branch}
+        if provider:
+            config['provider'] = provider
+        if origin:
+            config['origin'] = origin
+        self.config.write_text(json.dumps(config))
+
+    def configure_gitlab(self, write, branch='', repository='group/sub/team/project'):
+        self.configure(write, branch, repository, 'gitlab', GITLAB_URL, GITLAB_TOKEN)
 
     def sync(self, check=True):
         result = subprocess.run([sys.executable, str(MIRROR), 'sync'], env=self.env,
@@ -365,6 +377,140 @@ class GitMirrorTest(unittest.TestCase):
         self.assertEqual(self.upstream_log('agent/work')[0], 'agent-docker <agent-docker@localhost>|agent work')
         self.assertEqual(self.git(self.upstream, 'rev-parse', 'agent/work~1').stdout.strip(), head)
         self.assertEqual(self.git(self.upstream, 'show', 'agent/work:notes.txt').stdout, 'agent work\n')
+
+    def test_gitlab_subgroup_clone_fetch_push(self):
+        self.configure_gitlab(write=True, branch='agent/task-1')
+        self.sync()
+        clean = self.clean()
+        self.assertEqual(self.git(clean, 'for-each-ref', '--format=%(refname)').stdout.split(),
+                         ['refs/heads/main', 'refs/heads/work'])
+        guest = self.guest_clone('work')
+        self.assertEqual(set(self.git(guest, 'ls-files').stdout.split()), {'README.md', 'src/app.py', 'data.bin'})
+        self.assertEqual(self.git(guest, 'log', '--format=%an <%ae>').stdout, 'agent-docker <agent-docker@localhost>\n')
+        self.write(guest, {'src/app.py': 'print("gitlab")\n'})
+        self.commit(guest, 'GitLab change', GUEST)
+        self.push(guest, 'HEAD:work')
+        self.assertEqual(self.upstream_log('agent/task-1')[0], 'agent-docker <agent-docker@localhost>|GitLab change')
+        self.assertEqual(self.git(self.upstream, 'show', 'agent/task-1:src/app.py').stdout, 'print("gitlab")\n')
+        result = self.push(guest, 'HEAD:main', check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Запись разрешена только в ветку work', result.stderr)
+        self.git(guest, 'fetch', '-q', 'origin')
+        served = self.served(self.clean())
+        for secret in (GITLAB_URL.encode(), b'gitlab.fixture-7c1e', GITLAB_TOKEN.encode(), b'group/sub/team',
+                       b'agent/task-1', b'ivan'):
+            self.assertNotIn(secret, served.lower() if secret.islower() else served)
+        state = (self.clean().parent / 'state.json').read_text()
+        self.assertNotIn(GITLAB_TOKEN, state)
+
+    def test_provider_change_rebuilds_mirror_without_serving_old(self):
+        self.configure(write=False)
+        self.sync()
+        github = self.clean()
+        self.configure_gitlab(write=False, repository='owner/project')
+        result = self.resolve()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, '')
+        self.assertFalse(github.parent.exists())
+        self.sync()
+        gitlab = self.clean()
+        self.assertNotEqual(github, gitlab)
+        key = json.loads((gitlab.parent / 'state.json').read_text())['key']
+        self.assertEqual((key['provider'], key['origin']), ('gitlab', GITLAB_URL))
+        self.configure_gitlab(write=False, repository='owner/project')
+        self.config.write_text(self.config.read_text().replace(GITLAB_URL, 'https://gitlab.other-7c1e.invalid'))
+        self.assertNotEqual(self.resolve().returncode, 0)
+        self.assertFalse(gitlab.parent.exists())
+        self.configure(write=False)
+        self.sync()
+        self.assertEqual(json.loads((self.clean().parent / 'state.json').read_text())['key'],
+                         {'layout': 3, 'repository': 'owner/project', 'writeBranch': None})
+
+    def test_remote_url_and_credentials_per_provider(self):
+        upstream = self.root / 'upstream-proxy'
+        upstream.write_text('http://proxy-user:proxy-pass@proxy.fixture.invalid:3128\n')
+        env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_MIRROR_')}
+        env.update(GIT_MIRROR_ROOT=str(self.mirror), GIT_MIRROR_UPSTREAM=str(upstream))
+        previous = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(env)
+        try:
+            module = runpy.run_path(str(MIRROR))
+        finally:
+            os.environ.clear()
+            os.environ.update(previous)
+        cases = [
+            ({'provider': 'github', 'origin': 'https://github.com', 'repository': 'owner/project', 'token': TOKEN},
+             'https://github.com/owner/project.git', 'x-access-token:' + TOKEN),
+            ({'provider': 'gitlab', 'origin': GITLAB_URL, 'repository': 'group/sub/team/project', 'token': GITLAB_TOKEN},
+             GITLAB_URL + '/group/sub/team/project.git', 'oauth2:' + GITLAB_TOKEN),
+        ]
+        for config, url, credentials in cases:
+            with self.subTest(provider=config['provider']):
+                remote, git_env = module['remote_env'](config)
+                self.assertEqual(remote, url)
+                options = {git_env[f'GIT_CONFIG_KEY_{index}']: git_env[f'GIT_CONFIG_VALUE_{index}']
+                           for index in range(int(git_env['GIT_CONFIG_COUNT']))}
+                self.assertEqual(options['http.proxy'], 'http://proxy-user:proxy-pass@proxy.fixture.invalid:3128')
+                self.assertEqual(options['http.followRedirects'], 'false')
+                self.assertEqual(options['credential.helper'], '')
+                header = options['http.extraHeader']
+                self.assertEqual(base64.b64decode(header.removeprefix('Authorization: Basic ')).decode(), credentials)
+                self.assertNotIn(config['token'], remote)
+
+    def test_invalid_provider_configuration_is_refused(self):
+        valid = {'provider': 'gitlab', 'origin': GITLAB_URL, 'project': 'group/project', 'token': GITLAB_TOKEN,
+                 'write': False, 'writeBranch': ''}
+        accepted = [
+            valid, {**valid, 'project': '/'.join(['g'] * 20)}, {**valid, 'project': 'g/' + 'p' * 255},
+            {**valid, 'origin': 'https://gitlab.fixture.invalid:8443/a.b/c_d'},
+            {'repository': 'owner/project.atom', 'token': TOKEN, 'write': False, 'writeBranch': ''},
+            {'provider': 'github', 'origin': 'https://github.com', 'repository': 'owner/project', 'token': TOKEN,
+             'write': False, 'writeBranch': ''},
+        ]
+        for config in accepted:
+            with self.subTest(accepted=config):
+                self.config.write_text(json.dumps(config))
+                self.assertEqual(self.sync(check=False).returncode, 0)
+        cases = [
+            {**valid, 'provider': None}, {**valid, 'provider': ['gitlab']}, {**valid, 'origin': None},
+            {**valid, 'repository': 'group/project'}, {key: value for key, value in valid.items() if key != 'project'},
+            {**valid, 'origin': 'https://user@gitlab.fixture.invalid'}, {**valid, 'origin': GITLAB_URL + '/..'},
+            {**valid, 'origin': GITLAB_URL + '/./x'}, {**valid, 'origin': 'https://GitLab.fixture.invalid'},
+            {**valid, 'project': 'group/project.atom'},
+            {'provider': 'github', 'project': 'owner/project', 'token': TOKEN, 'write': False, 'writeBranch': ''},
+            {'repository': 'owner/project', 'project': 'owner/project', 'token': TOKEN, 'write': False, 'writeBranch': ''},
+            {**valid, 'provider': 'bitbucket'}, {**valid, 'origin': 'http://gitlab.fixture.invalid'},
+            {**valid, 'origin': 'https://user:pass@gitlab.fixture.invalid'},
+            {**valid, 'origin': 'https://gitlab.fixture.invalid/'}, {**valid, 'origin': 'https://gitlab.fixture.invalid?x=1'},
+            {**valid, 'origin': 'https://github.com'}, {key: value for key, value in valid.items() if key != 'origin'},
+            {**valid, 'project': 'project'}, {**valid, 'project': 'group/project.git'},
+            {**valid, 'project': 'group/-project'}, {**valid, 'project': 'group/../project'},
+            {**valid, 'project': '/'.join(['g'] * 21)}, {**valid, 'project': 'g/' + 'p' * 256},
+            {**valid, 'token': 'short'},
+            {'provider': 'github', 'origin': GITLAB_URL, 'repository': 'owner/project', 'token': TOKEN,
+             'write': False, 'writeBranch': ''},
+        ]
+        for config in cases:
+            with self.subTest(config=config):
+                self.config.write_text(json.dumps(config))
+                result = self.sync(check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, 'agent-docker: Git-шлюз не смог обработать запрос.\n')
+
+    def test_unreachable_gitlab_does_not_reveal_address_or_token(self):
+        self.configure_gitlab(write=True, branch='agent/task-1')
+        upstream = self.root / 'upstream-proxy'
+        upstream.write_text('http://proxy-user-7c1e:proxy-pass-7c1e@127.0.0.1:9\n')
+        self.env.pop('GIT_MIRROR_REMOTE')
+        self.env['GIT_MIRROR_UPSTREAM'] = str(upstream)
+        for command in ('sync', 'resolve'):
+            result = subprocess.run([sys.executable, str(MIRROR), command], env=self.env,
+                                    capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(result.returncode, 0)
+            output = result.stdout + result.stderr
+            for secret in ('gitlab.fixture-7c1e', GITLAB_TOKEN, 'proxy-pass-7c1e', 'group/sub/team', 'agent/task-1'):
+                self.assertNotIn(secret, output)
 
     def test_configuration_change_rebuilds_mirror(self):
         self.configure(write=True, branch='agent/work')

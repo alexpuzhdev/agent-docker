@@ -47,7 +47,7 @@ run_tty() {
     : > "$log"
     set +e
     {
-        for _ in $(seq 1 100); do grep -q 'токен GitHub' "$log" && { printf '%s\n' "$input"; break; }; sleep 0.1; done
+        for _ in $(seq 1 100); do grep -q 'Отдельный токен' "$log" && { printf '%s\n' "$input"; break; }; sleep 0.1; done
     } | script -qfec "$(declare -f target); target $(printf '%q ' "$@")" "$log" >/dev/null
     status=$?
     set -e
@@ -55,6 +55,7 @@ run_tty() {
 }
 check() { "$@" || { printf 'Провал (строка %s): %s\nКод: %s\nВывод:\n%s\n' "${BASH_LINENO[0]}" "$*" "$status" "$output" >&2; exit 1; }; }
 has() { grep -qF -- "$1" <<<"$output"; }
+lacks() { ! has "$1"; }
 docker_line() { grep -F -- "$1" "$FAKE_DOCKER_LOG" | head -1; }
 token_read=fixture_read_token_0001
 token_write=fixture_write_token_0002
@@ -78,7 +79,7 @@ check has 'токен GitHub'
 check has 'Git-шлюз настроен для vm-02.'
 check test "$(stat -c %a "$work/state/vm-02/git")" = 700
 check has 'vm-02 готов.'
-check test "$(cat "$config")" = '{"repository":"owner/repository","token":"fixture_read_token_0001","write":false,"writeBranch":""}'
+check test "$(cat "$config")" = '{"provider":"github","origin":"https://github.com","repository":"owner/repository","token":"fixture_read_token_0001","write":false,"writeBranch":""}'
 check test "$(stat -c %a "$config")" = 600
 check test "$(docker_line check-upstream.cjs | cut -d' ' -f1)" = git=no
 check test "$(docker_line /dev/kvm:/dev/kvm | cut -d' ' -f1)" = git=no
@@ -115,7 +116,7 @@ run_tty "$token_write" vm-git VM=vm-02 REPO=owner/repository GIT_WRITE=1 GIT_WRI
 check test "$status" -eq 0
 check has 'токен GitHub'
 check has 'Git-шлюз настроен для vm-02.'
-check test "$(cat "$config")" = '{"repository":"owner/repository","token":"fixture_write_token_0002","write":true,"writeBranch":"test/gateway-write"}'
+check test "$(cat "$config")" = '{"provider":"github","origin":"https://github.com","repository":"owner/repository","token":"fixture_write_token_0002","write":true,"writeBranch":"test/gateway-write"}'
 check test "$(grep -c "$token_write" <<<"$output")" -eq 0
 
 run_no_tty vm-setup VM=vm-02 REPO=owner/repository GIT_WRITE=1 GIT_WRITE_BRANCH=test/gateway-write
@@ -146,7 +147,60 @@ check test "$status" -ne 0
 check has 'Не удалось прочитать сохранённую настройку'
 check cmp -s "$config" "$work/saved.json"
 
+gitlab=(REPO=group/sub/project GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid/scm/ GIT_WRITE=1 GIT_WRITE_BRANCH=agent/task-1)
+token_gitlab=glpat-fixture.gitlab_token-0005
+rm -f "$config"
+run_no_tty vm-setup VM=vm-02 "${gitlab[@]}"
+check test "$status" -ne 0
+check has 'нужен интерактивный терминал'
+check test ! -e "$config"
+
+run_tty "$token_gitlab" vm-setup VM=vm-02 "${gitlab[@]}"
+check test "$status" -eq 0
+check has 'Отдельный токен GitLab для group/sub/project'
+check has 'Git-шлюз настроен для vm-02.'
+check test "$(cat "$config")" = '{"provider":"gitlab","origin":"https://gitlab.fixture.invalid/scm","project":"group/sub/project","token":"glpat-fixture.gitlab_token-0005","write":true,"writeBranch":"agent/task-1"}'
+check test "$(stat -c %a "$config")" = 600
+check test "$(grep -c "$token_gitlab" <<<"$output")" -eq 0
+cp "$config" "$work/saved.json"
+
+run_no_tty vm-setup VM=vm-02 "${gitlab[@]}"
+check test "$status" -eq 0
+check has 'Сохранённая настройка используется без изменений.'
+check cmp -s "$config" "$work/saved.json"
+
+run_no_tty vm-setup VM=vm-02 REPO=group/project GIT_WRITE=1 GIT_WRITE_BRANCH=agent/task-1
+check test "$status" -ne 0
+check has 'с другим провайдером, репозиторием или режимом записи'
+check has 'make vm-git VM=vm-02 REPO=group/project GIT_WRITE=1 GIT_WRITE_BRANCH=agent/task-1'
+check cmp -s "$config" "$work/saved.json"
+
+run_no_tty vm-setup VM=vm-02 REPO=group/sub/project GIT_PROVIDER=gitlab GIT_URL=https://gitlab.other.invalid GIT_WRITE=1 GIT_WRITE_BRANCH=agent/task-1
+check test "$status" -ne 0
+check has 'make vm-git VM=vm-02 REPO=group/sub/project GIT_PROVIDER=gitlab GIT_URL=https://gitlab.other.invalid GIT_WRITE=1 GIT_WRITE_BRANCH=agent/task-1'
+check cmp -s "$config" "$work/saved.json"
+
+for invalid in 'GIT_PROVIDER=bitbucket REPO=owner/repository|GIT_PROVIDER=github или GIT_PROVIDER=gitlab' \
+    'GIT_PROVIDER=gitlab REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=http://gitlab.fixture.invalid REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://user:pass@gitlab.fixture.invalid REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid?x=1 REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://github.com REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid REPO=project|REPO=group/subgroup/project' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid/.. REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://user@gitlab.fixture.invalid REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid REPO=group/project.git|REPO=group/subgroup/project' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid REPO=group/-x|REPO=group/subgroup/project' \
+    'GIT_URL=https://gitlab.fixture.invalid REPO=owner/repository|GIT_URL задаётся только вместе с GIT_PROVIDER=gitlab'; do
+    read -r -a arguments <<<"${invalid%%|*}"
+    run_no_tty vm-setup VM=vm-02 "${arguments[@]}"
+    check test "$status" -ne 0
+    check has "${invalid#*|}"
+    check lacks 'Отдельный токен'
+    check cmp -s "$config" "$work/saved.json"
+done
+
 check test -f "$work/project/.env"
-check test "$(grep -rlE --exclude-dir=tests 'fixture_(read|write)_token' "$work/project" | wc -l)" -eq 0
+check test "$(grep -rlE --exclude-dir=tests 'fixture_(read|write)_token|gitlab_token' "$work/project" | wc -l)" -eq 0
 check test -z "$(find "$work/state/vm-02/git" -name '.repository.*')"
 printf 'test_vm_setup_git: ok (%s)\n' "$(command -v make >/dev/null && echo make || echo 'bash v2/manage.sh без make')"

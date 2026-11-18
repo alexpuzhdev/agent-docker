@@ -68,6 +68,7 @@ write_config "{\"repository\":\"owner/repository\",\"token\":\"$token\",\"write\
 run_status
 check test "$status" -eq 0
 check has 'Репозиторий: owner/repository'
+check has 'Провайдер: GitHub'
 check has 'Режим: только чтение'
 check lacks 'запись включена'
 check has 'Разрешённая ветка: нет'
@@ -124,6 +125,23 @@ for broken in \
     check read_only
     check unchanged
 done
+
+write_config "{\"provider\":\"gitlab\",\"origin\":\"https://gitlab.fixture.invalid/scm\",\"project\":\"group/sub/project\",\"token\":\"$token\",\"write\":true,\"writeBranch\":\"agent/task-1\"}"
+run_status
+check test "$status" -eq 0
+check has 'Провайдер: GitLab https://gitlab.fixture.invalid/scm'
+check has 'Репозиторий: group/sub/project'
+check has 'Разрешённая ветка: agent/task-1'
+check lacks "$token"
+check read_only
+check unchanged
+
+write_config "{\"provider\":\"gitlab\",\"project\":\"group/sub/project\",\"token\":\"$token\",\"write\":false,\"writeBranch\":\"\"}"
+run_status
+check test "$status" -ne 0
+check has 'Не удалось прочитать сохранённую настройку Git-шлюза vm-02.'
+check lacks "$token"
+check unchanged
 
 check test "$(grep -rlE --exclude-dir=tests 'fixture_status_token' "$work/project" | wc -l)" -eq 0
 printf 'test_vm_git_status: ok (%s)\n' "$(command -v make >/dev/null && echo make || echo 'bash v2/manage.sh без make')"

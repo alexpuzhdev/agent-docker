@@ -119,3 +119,83 @@ test('guest sees an anonymous snapshot and pushes only to the assigned branch', 
     assert.equal(failed.status, 502);
     assert.equal(await failed.text(), '');
 });
+
+test('settings parser accepts GitHub and self-managed GitLab and hides the token', async t => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-git-settings-'));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const config = path.join(root, 'repository.json');
+    const settings = async value => {
+        await fs.writeFile(config, JSON.stringify(value));
+        return run(process.execPath, [path.join(__dirname, '..', 'git-gateway.cjs'), '--settings', config]);
+    };
+    const gitlabToken = 'glpat-fixture.settings-0007';
+    assert.equal((await settings({ repository: 'owner/project', token, write: false })).stdout,
+        'github https://github.com owner/project false \n');
+    const gitlab = await settings({
+        provider: 'gitlab', origin: 'https://gitlab.fixture.invalid/scm', project: 'group/sub/project',
+        token: gitlabToken, write: true, writeBranch: 'agent/task-1',
+    });
+    assert.equal(gitlab.stdout, 'gitlab https://gitlab.fixture.invalid/scm group/sub/project true agent/task-1\n');
+    for (const invalid of [
+        { provider: 'gitlab', project: 'group/project', token: gitlabToken, write: false },
+        { provider: 'gitlab', origin: 'http://gitlab.fixture.invalid', project: 'group/project', token: gitlabToken, write: false },
+        { provider: 'gitlab', origin: 'https://gitlab.fixture.invalid', project: 'project', token: gitlabToken, write: false },
+        { provider: 'gitlab', origin: 'https://gitlab.fixture.invalid', repository: 'group/project', token: gitlabToken, write: false },
+        { provider: 'gitlab', origin: 'https://gitlab.fixture.invalid/..', project: 'group/project', token: gitlabToken, write: false },
+        { provider: null, repository: 'owner/project', token, write: false },
+        { provider: ['github'], origin: 'https://gitlab.fixture.invalid', repository: 'owner/project', token, write: false },
+        { provider: 'github', origin: 'https://gitlab.fixture.invalid', repository: 'owner/project', token, write: false },
+        { provider: 'bitbucket', repository: 'owner/project', token, write: false },
+    ]) {
+        const failure = await settings(invalid).catch(error => error);
+        assert.equal(failure.code, 1);
+        assert.ok(!String(failure.stderr).includes(gitlabToken) && !String(failure.stderr).includes('gitlab.fixture'));
+    }
+});
+
+test('GitLab assignment is served through the same guest URL', async t => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-gitlab-test-'));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const config = path.join(root, 'repository.json');
+    const upstream = path.join(root, 'upstream.git');
+    const seed = path.join(root, 'seed');
+    const copy = path.join(root, 'clone');
+    const saved = { ...process.env };
+    t.after(() => {
+        for (const name of Object.keys(process.env)) if (!(name in saved)) delete process.env[name];
+        Object.assign(process.env, saved);
+    });
+    process.env.GIT_CONFIG_NOSYSTEM = '1';
+    process.env.GIT_CONFIG_GLOBAL = '/dev/null';
+    process.env.GIT_MIRROR_ROOT = path.join(root, 'mirror');
+    process.env.GIT_MIRROR_CONFIG = config;
+    process.env.GIT_MIRROR_REMOTE = 'file://' + upstream;
+    const git = (...args) => run('git', args);
+    await git('init', '--bare', '--initial-branch=main', upstream);
+    await git('init', '--initial-branch=main', seed);
+    await fs.writeFile(path.join(seed, 'app.txt'), 'owner\n');
+    await git('-C', seed, 'add', '-A');
+    await git('-C', seed, ...owner, 'commit', '-m', 'GitLab owner commit');
+    await git('-C', seed, 'push', upstream, 'main');
+    const gitlabToken = 'glpat-fixture.handler-0008';
+    await fs.writeFile(config, JSON.stringify({
+        provider: 'gitlab', origin: 'https://gitlab.fixture.invalid/scm', project: 'group/sub/project',
+        token: gitlabToken, write: true, writeBranch: 'agent/task-1',
+    }));
+    const { createGitHandler } = require('../git-gateway.cjs');
+    const gateway = http.createServer(createGitHandler(config, process.env.GIT_MIRROR_ROOT));
+    t.after(() => gateway.close());
+    const remote = 'http://127.0.0.1:' + await listen(gateway) + '/project.git';
+    const listing = await (await fetch(remote + '/info/refs?service=git-upload-pack')).text();
+    for (const secret of [gitlabToken, 'gitlab.fixture', 'group/sub', 'agent/task-1', 'Ivan']) {
+        assert.ok(!listing.includes(secret), secret);
+    }
+    await git('clone', '--branch', 'work', remote, copy);
+    assert.equal((await git('-C', copy, 'log', '--format=%an')).stdout, 'agent-docker\n');
+    await fs.writeFile(path.join(copy, 'app.txt'), 'guest\n');
+    await git('-C', copy, ...guest, 'commit', '-am', 'GitLab guest change');
+    await git('-C', copy, 'push', 'origin', 'HEAD:refs/heads/work');
+    assert.equal((await git('-C', upstream, 'log', '-1', '--format=%an|%s', 'agent/task-1')).stdout,
+        'agent-docker|GitLab guest change\n');
+    await assert.rejects(git('-C', copy, 'push', 'origin', 'HEAD:main'), /только в ветку work/);
+});

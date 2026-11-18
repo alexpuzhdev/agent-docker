@@ -91,11 +91,29 @@ configure_proxy() (
     mv -f "$candidate" "$VM_STATE/upstream"
 )
 git_settings() {
+    provider=${GIT_PROVIDER:-github}
+    origin=${GIT_URL:-}
     repository=${REPO:-}
     mode=${GIT_WRITE:-0}
     branch=${GIT_WRITE_BRANCH:-}
-    [[ $repository =~ ^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}/[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$ && $repository != *.git ]] ||
-        fail 'Укажите GitHub-репозиторий как REPO=owner/name.'
+    case $provider in
+        github)
+            [[ -z $origin || $origin = https://github.com ]] || fail 'GIT_URL задаётся только вместе с GIT_PROVIDER=gitlab.'
+            origin=https://github.com
+            [[ $repository =~ ^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}/[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$ && $repository != *.git ]] ||
+                fail 'Укажите GitHub-репозиторий как REPO=owner/name.'
+            ;;
+        gitlab)
+            origin=${origin%/}
+            [[ ${#origin} -le 512 && $origin != https://github.com &&
+                $origin =~ ^https://[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*(:[1-9][0-9]{0,4})?(/[a-zA-Z0-9_~-][a-zA-Z0-9_.~-]*)*$ ]] ||
+                fail 'Укажите адрес сервера GitLab как GIT_URL=https://gitlab.example.com.'
+            [[ ${#repository} -le 1024 && $repository != *.git && $repository != *.atom &&
+                $repository =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,254}(/[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,254}){1,19}$ ]] ||
+                fail 'Укажите проект GitLab как REPO=group/subgroup/project.'
+            ;;
+        *) fail 'Укажите GIT_PROVIDER=github или GIT_PROVIDER=gitlab.' ;;
+    esac
     [[ $mode = 0 || $mode = 1 ]] || fail 'Укажите GIT_WRITE=0 или GIT_WRITE=1.'
     if [[ $mode = 1 ]]; then
         [[ ${#branch} -le 120 && $branch != main && $branch != master &&
@@ -108,16 +126,18 @@ git_settings() {
     if [[ $mode = 1 ]]; then writable=true; fi
 }
 write_git_config() (
-    local token candidate
-    if ! IFS= read -rs -p "Отдельный токен GitHub для $repository: " token </dev/tty; then
+    local token candidate label=GitHub pattern='^[a-zA-Z0-9_-]{10,512}$' field=repository
+    if [[ $provider = gitlab ]]; then label=GitLab pattern='^[a-zA-Z0-9_.-]{10,512}$' field=project; fi
+    if ! IFS= read -rs -p "Отдельный токен $label для $repository: " token </dev/tty; then
         fail 'Для настройки Git нужен интерактивный терминал.'
     fi
     printf '\n' >&2
-    [[ $token =~ ^[a-zA-Z0-9_-]{10,512}$ ]] || fail 'Недопустимый формат токена GitHub.'
+    [[ $token =~ $pattern ]] || fail "Недопустимый формат токена $label."
     mkdir -p "$VM_STATE/git"
     candidate=$(mktemp "$VM_STATE/git/.repository.XXXXXX")
     trap 'rm -f -- "$candidate"' EXIT
-    printf '{"repository":"%s","token":"%s","write":%s,"writeBranch":"%s"}\n' "$repository" "$token" "$writable" "$branch" > "$candidate"
+    printf '{"provider":"%s","origin":"%s","%s":"%s","token":"%s","write":%s,"writeBranch":"%s"}\n' \
+        "$provider" "$origin" "$field" "$repository" "$token" "$writable" "$branch" > "$candidate"
     if [[ ${1:-} = create ]]; then
         ln -T -- "$candidate" "$VM_STATE/git/repository.json" ||
             fail "Git-шлюз $VM_NAME уже настроен параллельной командой. Повторите vm-setup."
@@ -133,7 +153,7 @@ saved_git_settings() {
         "$base_image" node /scripts/git-gateway.cjs --settings /repository.json
 }
 git_status() {
-    local current repository writable branch
+    local current provider origin repository writable branch
     if ! test -e "$VM_STATE/git/repository.json" && ! test -L "$VM_STATE/git/repository.json"; then
         printf 'Git-шлюз %s не настроен. Назначьте репозиторий: make vm-git VM=%s REPO=owner/name\n' "$VM_NAME" "$VM_NAME"
         return
@@ -143,8 +163,12 @@ git_status() {
             fail "Не удалось прочитать сохранённую настройку Git-шлюза $VM_NAME. Задайте её заново: make vm-git VM=$VM_NAME REPO=owner/name"
         fail "Не удалось проверить настройку Git-шлюза $VM_NAME: Docker не запустил парсер из образа $base_image."
     }
-    read -r repository writable branch <<<"$current"
-    printf 'Git-шлюз %s\nРепозиторий: %s\n' "$VM_NAME" "$repository"
+    read -r provider origin repository writable branch <<<"$current"
+    if [[ $provider = gitlab ]]; then
+        printf 'Git-шлюз %s\nПровайдер: GitLab %s\nРепозиторий: %s\n' "$VM_NAME" "$origin" "$repository"
+    else
+        printf 'Git-шлюз %s\nПровайдер: GitHub\nРепозиторий: %s\n' "$VM_NAME" "$repository"
+    fi
     if [[ $writable = true && -n $branch ]]; then
         printf 'Режим: чтение и запись\nРазрешённая ветка: %s\n' "$branch"
     elif [[ $writable = true ]]; then
@@ -155,14 +179,15 @@ git_status() {
 }
 configure_git() (
     configured
-    local repository mode branch writable
+    local provider origin repository mode branch writable
     git_settings
     write_git_config
 )
 setup_git() (
-    local repository mode branch writable current update
+    local provider origin repository mode branch writable current update
     git_settings
     update="make vm-git VM=$VM_NAME REPO=$repository"
+    if [[ $provider = gitlab ]]; then update+=" GIT_PROVIDER=gitlab GIT_URL=$origin"; fi
     if [[ $writable = true ]]; then update+=" GIT_WRITE=1 GIT_WRITE_BRANCH=$branch"; fi
     if ! test -e "$VM_STATE/git/repository.json"; then
         write_git_config create
@@ -171,8 +196,8 @@ setup_git() (
     if ! current=$(saved_git_settings); then
         fail "Не удалось прочитать сохранённую настройку Git-шлюза $VM_NAME. Задайте её заново: $update"
     fi
-    if [[ $current != "$repository $writable $branch" ]]; then
-        fail "Для $VM_NAME уже настроен Git-шлюз с другим репозиторием или режимом записи. Сохранённая настройка не изменена. Чтобы заменить её, выполните: $update"
+    if [[ $current != "$provider $origin $repository $writable $branch" ]]; then
+        fail "Для $VM_NAME уже настроен Git-шлюз с другим провайдером, репозиторием или режимом записи. Сохранённая настройка не изменена. Чтобы заменить её, выполните: $update"
     fi
     printf 'Git-шлюз %s уже настроен для %s. Сохранённая настройка используется без изменений.\n' "$VM_NAME" "$repository"
 )

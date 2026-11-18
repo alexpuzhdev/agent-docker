@@ -21,8 +21,17 @@ REMOTE = os.environ.get('GIT_MIRROR_REMOTE', '')
 MIRRORS = ROOT / 'mirrors'
 LEGACY = (ROOT / 'clean.git', ROOT / 'source.git', ROOT / 'state.json')
 CLEAN = SOURCE = STATE = None
-ORIGIN = 'github.com'
-USERNAME = 'x-access-token'
+PROVIDERS = {
+    'github': {'field': 'repository', 'suffixes': ('.git',), 'username': 'x-access-token',
+               'token': r'[a-zA-Z0-9_-]{10,512}',
+               'repository': r'[a-zA-Z0-9][a-zA-Z0-9-]{0,38}/[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}'},
+    'gitlab': {'field': 'project', 'suffixes': ('.git', '.atom'), 'username': 'oauth2',
+               'token': r'[a-zA-Z0-9_.-]{10,512}',
+               'repository': r'[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,254}(?:/[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,254}){1,19}'},
+}
+GITHUB = 'https://github.com'
+ORIGIN_PATTERN = (r'https://[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*'
+                  r'(?::[1-9][0-9]{0,4})?(?:/[a-zA-Z0-9_~-][a-zA-Z0-9_.~-]*)*')
 READ_BRANCH = 'main'
 WORK_BRANCH = 'work'
 LAYOUT = 3
@@ -69,29 +78,37 @@ def output(repo, *args, **options):
 
 def load_config():
     config = json.loads(CONFIG.read_text())
-    repository, token, write = config.get('repository'), config.get('token'), config.get('write')
-    if (not isinstance(repository, str) or repository.endswith('.git') or
-            not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9-]{0,38}/[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}', repository) or
-            not isinstance(token, str) or not re.fullmatch(r'[a-zA-Z0-9_-]{10,512}', token) or
-            not isinstance(write, bool)):
+    token, write = config.get('token'), config.get('write')
+    provider = config.get('provider', 'github')
+    origin = config.get('origin', GITHUB if provider == 'github' else None)
+    rules = PROVIDERS.get(provider) if isinstance(provider, str) else None
+    repository = config.get(rules['field']) if rules else None
+    if (not rules or any(field in config for field in ('repository', 'project') if field != rules['field']) or
+            not isinstance(repository, str) or repository.endswith(rules['suffixes']) or
+            len(repository) > 1024 or not re.fullmatch(rules['repository'], repository) or
+            not isinstance(token, str) or not re.fullmatch(rules['token'], token) or
+            not isinstance(write, bool) or not isinstance(origin, str) or not re.fullmatch(ORIGIN_PATTERN, origin) or
+            len(origin) > 512 or (provider == 'github') != (origin == GITHUB)):
         raise ValueError('Некорректная конфигурация Git-шлюза.')
     branch = config.get('writeBranch')
     writable = (write and isinstance(branch, str) and len(branch) <= 120 and branch not in ('main', 'master') and
                 re.fullmatch(r'(?:[a-zA-Z0-9][a-zA-Z0-9_-]*/)*[a-zA-Z0-9][a-zA-Z0-9_-]*', branch))
-    return {'repository': repository, 'token': token, 'branch': branch if writable else None}
+    return {'provider': provider, 'origin': origin, 'repository': repository, 'token': token,
+            'branch': branch if writable else None}
 
 
 def remote_env(config):
     if REMOTE:
         return REMOTE, clean_env()
-    credentials = base64.b64encode(f'{USERNAME}:{config["token"]}'.encode()).decode()
+    username = PROVIDERS[config['provider']]['username']
+    credentials = base64.b64encode(f'{username}:{config["token"]}'.encode()).decode()
     options = [('http.proxy', UPSTREAM.read_text().strip()), ('http.followRedirects', 'false'),
                ('http.extraHeader', f'Authorization: Basic {credentials}'), ('credential.helper', '')]
     env = clean_env(GIT_CONFIG_COUNT=str(len(options)))
     for index, (key, value) in enumerate(options):
         env[f'GIT_CONFIG_KEY_{index}'] = key
         env[f'GIT_CONFIG_VALUE_{index}'] = value
-    return f'https://{ORIGIN}/{config["repository"]}.git', env
+    return f'{config["origin"]}/{config["repository"]}.git', env
 
 
 @contextmanager
@@ -123,6 +140,8 @@ def secret():
 def select(config):
     global CLEAN, SOURCE, STATE
     key = {'layout': LAYOUT, 'repository': config['repository'], 'writeBranch': config['branch']}
+    if config['provider'] != 'github':
+        key.update(provider=config['provider'], origin=config['origin'])
     name = hmac.new(secret(), json.dumps(key, sort_keys=True).encode(), hashlib.sha256).hexdigest()
     home = MIRRORS / name
     CLEAN, SOURCE, STATE = home / 'clean.git', home / 'source.git', home / 'state.json'
