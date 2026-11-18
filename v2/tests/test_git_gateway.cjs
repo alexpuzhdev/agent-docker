@@ -136,6 +136,12 @@ test('settings parser accepts GitHub and self-managed GitLab and hides the token
         token: gitlabToken, write: true, writeBranch: 'agent/task-1',
     });
     assert.equal(gitlab.stdout, 'gitlab https://gitlab.fixture.invalid/scm group/sub/project true agent/task-1\n');
+    const deep = Array.from({ length: 20 }, (_, index) => 'g' + index).join('/');
+    assert.equal((await settings({
+        provider: 'gitlab', origin: 'https://gitlab.fixture.invalid:65535/a.b', project: deep, token: gitlabToken, write: false,
+    })).stdout, `gitlab https://gitlab.fixture.invalid:65535/a.b ${deep} false \n`);
+    assert.equal((await settings({ repository: 'owner/project.atom', token, write: false })).stdout,
+        'github https://github.com owner/project.atom false \n');
     for (const invalid of [
         { provider: 'gitlab', project: 'group/project', token: gitlabToken, write: false },
         { provider: 'gitlab', origin: 'http://gitlab.fixture.invalid', project: 'group/project', token: gitlabToken, write: false },
@@ -144,6 +150,13 @@ test('settings parser accepts GitHub and self-managed GitLab and hides the token
         { provider: 'gitlab', origin: 'https://gitlab.fixture.invalid/..', project: 'group/project', token: gitlabToken, write: false },
         { provider: null, repository: 'owner/project', token, write: false },
         { provider: ['github'], origin: 'https://gitlab.fixture.invalid', repository: 'owner/project', token, write: false },
+        { provider: 'github', project: 'owner/project', token, write: false },
+        { repository: 'owner/project', project: 'owner/project', token, write: false },
+        { provider: 'gitlab', origin: 'https://10.0.0.5', project: 'group/project', token: gitlabToken, write: false },
+        { provider: 'gitlab', origin: 'https://www.github.com', project: 'group/project', token: gitlabToken, write: false },
+        { provider: 'gitlab', origin: 'https://github.com:443', project: 'group/project', token: gitlabToken, write: false },
+        { provider: 'gitlab', origin: 'https://gitlab.fixture.invalid:65536', project: 'group/project', token: gitlabToken, write: false },
+        ['not', 'an', 'object'],
         { provider: 'github', origin: 'https://gitlab.fixture.invalid', repository: 'owner/project', token, write: false },
         { provider: 'bitbucket', repository: 'owner/project', token, write: false },
     ]) {

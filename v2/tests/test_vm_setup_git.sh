@@ -20,7 +20,22 @@ printf 'git=%s %s\n' "$git" "$*" >> "$FAKE_DOCKER_LOG"
 case " $* " in
     *' ps -q '*|*' ps -a -q '*) echo fake-container ;;
     *' exec '*) [[ $* == *AGENT_DOCKER_READY* ]] ;;
-    *' --settings /repository.json '*) node "$work/project/v2/git-gateway.cjs" --settings "$FAKE_GIT_CONFIG" ;;
+    *' inspect --format {{.Image}} '*) echo sha256:fake-gateway-image ;;
+    *' image inspect sha256:fake-gateway-image '*) [[ -z ${FAKE_NO_GATEWAY_IMAGE:-} ]] ;;
+    *' --settings /probe.json '*)
+        if [[ -n ${FAKE_OLD_GATEWAY:-} ]]; then echo 'probe/project false '; exit 0; fi
+        for argument; do
+            if [[ $argument == type=bind,src=*,dst=/probe.json,readonly ]]; then probe=${argument#type=bind,src=}; probe=${probe%%,dst=*}; fi
+        done
+        node "$work/project/v2/git-gateway.cjs" --settings "$probe" ;;
+    *' --settings /repository.json '*)
+        if [[ -n ${FAKE_OLD_SETTINGS:-} ]]; then
+            current=$(node "$work/project/v2/git-gateway.cjs" --settings "$FAKE_GIT_CONFIG") || exit
+            read -r _ _ rest <<<"$current"
+            printf '%s\n' "$rest"
+            exit 0
+        fi
+        node "$work/project/v2/git-gateway.cjs" --settings "$FAKE_GIT_CONFIG" ;;
 esac
 EOF
 chmod +x "$work/bin/docker"
@@ -188,6 +203,14 @@ for invalid in 'GIT_PROVIDER=bitbucket REPO=owner/repository|GIT_PROVIDER=github
     'GIT_PROVIDER=gitlab GIT_URL=https://github.com REPO=group/project|GIT_URL=https://gitlab.example.com' \
     'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid REPO=project|REPO=group/subgroup/project' \
     'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid/.. REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid/./x REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://GitLab.fixture.invalid REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://10.0.0.5 REPO=group/project|по DNS-имени' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://10.0.0.5:8443/scm REPO=group/project|по DNS-имени' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://github.com:443 REPO=group/project|по DNS-имени' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://www.github.com REPO=group/project|по DNS-имени' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://github.com/scm REPO=group/project|по DNS-имени' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid:65536 REPO=group/project|по DNS-имени' \
     'GIT_PROVIDER=gitlab GIT_URL=https://user@gitlab.fixture.invalid REPO=group/project|GIT_URL=https://gitlab.example.com' \
     'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid REPO=group/project.git|REPO=group/subgroup/project' \
     'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid REPO=group/-x|REPO=group/subgroup/project' \
@@ -199,6 +222,41 @@ for invalid in 'GIT_PROVIDER=bitbucket REPO=owner/repository|GIT_PROVIDER=github
     check lacks 'Отдельный токен'
     check cmp -s "$config" "$work/saved.json"
 done
+
+for accepted in 'https://gitlab.fixture.invalid:65535/a.b/c_d' 'https://gitlab' 'https://scm-01.fixture.invalid'; do
+    run_no_tty vm-git VM=vm-02 GIT_PROVIDER=gitlab GIT_URL="$accepted" REPO=group/project
+    check test "$status" -ne 0
+    check has 'нужен интерактивный терминал'
+    check cmp -s "$config" "$work/saved.json"
+done
+
+for gateway in FAKE_OLD_GATEWAY FAKE_NO_GATEWAY_IMAGE; do
+    for command in vm-git vm-setup; do
+        : > "$FAKE_DOCKER_LOG"
+        set +e
+        output=$(env "$gateway=1" setsid -w bash -c "$(declare -f target); target \"\$@\"" _ "$command" VM=vm-02 \
+            REPO=group/other GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid 2>&1 </dev/null)
+        status=$?
+        set -e
+        check test "$status" -ne 0
+        check has 'не поддерживает GitLab'
+        check lacks 'Отдельный токен'
+        check test -z "$(docker_line ' up -d ')"
+        check cmp -s "$config" "$work/saved.json"
+    done
+done
+check test -z "$(find "$work/state/vm-02/git" -name '.probe.*')"
+
+printf '{"provider":"github","origin":"https://github.com","repository":"owner/repository","token":"fixture_read_token_0001","write":false,"writeBranch":""}\n' > "$config"
+cp "$config" "$work/saved.json"
+: > "$FAKE_DOCKER_LOG"
+set +e
+output=$(FAKE_OLD_SETTINGS=1 setsid -w bash -c "$(declare -f target); target \"\$@\"" _ vm-setup VM=vm-02 REPO=owner/repository 2>&1 </dev/null)
+status=$?
+set -e
+check test "$status" -eq 0
+check has 'Сохранённая настройка используется без изменений.'
+check cmp -s "$config" "$work/saved.json"
 
 check test -f "$work/project/.env"
 check test "$(grep -rlE --exclude-dir=tests 'fixture_(read|write)_token|gitlab_token' "$work/project" | wc -l)" -eq 0

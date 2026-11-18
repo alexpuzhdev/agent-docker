@@ -105,9 +105,11 @@ git_settings() {
             ;;
         gitlab)
             origin=${origin%/}
-            [[ ${#origin} -le 512 && $origin != https://github.com &&
-                $origin =~ ^https://[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*(:[1-9][0-9]{0,4})?(/[a-zA-Z0-9_~-][a-zA-Z0-9_.~-]*)*$ ]] ||
-                fail 'Укажите адрес сервера GitLab как GIT_URL=https://gitlab.example.com.'
+            local host=${origin#https://}
+            host=${host%%[:/]*}
+            [[ ${#origin} -le 512 && $host != github.com && $host != *.github.com &&
+                $origin =~ ^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z]([a-z0-9-]{0,61}[a-z0-9])?(:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(/[a-zA-Z0-9_~-][a-zA-Z0-9_.~-]*)*$ ]] ||
+                fail 'Укажите адрес сервера GitLab по DNS-имени как GIT_URL=https://gitlab.example.com.'
             [[ ${#repository} -le 1024 && $repository != *.git && $repository != *.atom &&
                 $repository =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,254}(/[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,254}){1,19}$ ]] ||
                 fail 'Укажите проект GitLab как REPO=group/subgroup/project.'
@@ -146,6 +148,42 @@ write_git_config() (
     fi
     printf 'Git-шлюз настроен для %s. Адрес в госте: http://git.agent-docker.test/project.git\n' "$VM_NAME"
 )
+parse_git_settings() {
+    local -a fields
+    read -r -a fields <<<"$1"
+    if [[ ${fields[0]:-} = github || ${fields[0]:-} = gitlab ]] && [[ ${fields[1]:-} = https://* ]]; then
+        saved_provider=${fields[0]} saved_origin=${fields[1]} saved_repository=${fields[2]:-}
+        saved_writable=${fields[3]:-} saved_branch=${fields[4]:-}
+    else
+        saved_provider=github saved_origin=https://github.com saved_repository=${fields[0]:-}
+        saved_writable=${fields[1]:-} saved_branch=${fields[2]:-}
+    fi
+    [[ -n $saved_repository && ( $saved_writable = true || $saved_writable = false ) ]]
+}
+gateway_supports_gitlab() (
+    local id target probe output
+    id=$(compose ps -q proxy 2>/dev/null || true)
+    if [[ -n $id ]]; then
+        target=$(docker inspect --format '{{.Image}}' "$id") || exit 1
+    else
+        target=$image
+    fi
+    docker image inspect "$target" >/dev/null 2>&1 || exit 1
+    mkdir -p "$VM_STATE/git"
+    probe=$(mktemp -d "$VM_STATE/git/.probe.XXXXXX")
+    trap 'rm -rf -- "$probe"' EXIT
+    printf '{"provider":"gitlab","origin":"https://gitlab.probe.invalid","project":"probe/project","token":"probe-token-00000000","write":false,"writeBranch":""}\n' \
+        > "$probe/repository.json"
+    output=$(docker run --rm --pull never --network none \
+        --mount "type=bind,src=$probe/repository.json,dst=/probe.json,readonly" \
+        "$target" node /opt/agent-docker/git-gateway.cjs --settings /probe.json 2>/dev/null) || exit 1
+    [[ $output = 'gitlab https://gitlab.probe.invalid probe/project false ' ]]
+)
+require_gitlab_gateway() {
+    if [[ $provider = gitlab ]] && ! gateway_supports_gitlab; then
+        fail "Образ Git-шлюза $VM_NAME не поддерживает GitLab. Выполните make vm-stop VM=$VM_NAME и make vm-setup VM=$VM_NAME, затем повторите настройку."
+    fi
+}
 saved_git_settings() {
     docker run --rm --pull never --network none \
         --mount "type=bind,src=$root/v2,dst=/scripts,readonly" \
@@ -153,7 +191,7 @@ saved_git_settings() {
         "$base_image" node /scripts/git-gateway.cjs --settings /repository.json
 }
 git_status() {
-    local current provider origin repository writable branch
+    local current saved_provider saved_origin saved_repository saved_writable saved_branch
     if ! test -e "$VM_STATE/git/repository.json" && ! test -L "$VM_STATE/git/repository.json"; then
         printf 'Git-шлюз %s не настроен. Назначьте репозиторий: make vm-git VM=%s REPO=owner/name\n' "$VM_NAME" "$VM_NAME"
         return
@@ -163,15 +201,16 @@ git_status() {
             fail "Не удалось прочитать сохранённую настройку Git-шлюза $VM_NAME. Задайте её заново: make vm-git VM=$VM_NAME REPO=owner/name"
         fail "Не удалось проверить настройку Git-шлюза $VM_NAME: Docker не запустил парсер из образа $base_image."
     }
-    read -r provider origin repository writable branch <<<"$current"
-    if [[ $provider = gitlab ]]; then
-        printf 'Git-шлюз %s\nПровайдер: GitLab %s\nРепозиторий: %s\n' "$VM_NAME" "$origin" "$repository"
+    parse_git_settings "$current" ||
+        fail "Не удалось прочитать сохранённую настройку Git-шлюза $VM_NAME. Задайте её заново: make vm-git VM=$VM_NAME REPO=owner/name"
+    if [[ $saved_provider = gitlab ]]; then
+        printf 'Git-шлюз %s\nПровайдер: GitLab %s\nРепозиторий: %s\n' "$VM_NAME" "$saved_origin" "$saved_repository"
     else
-        printf 'Git-шлюз %s\nПровайдер: GitHub\nРепозиторий: %s\n' "$VM_NAME" "$repository"
+        printf 'Git-шлюз %s\nПровайдер: GitHub\nРепозиторий: %s\n' "$VM_NAME" "$saved_repository"
     fi
-    if [[ $writable = true && -n $branch ]]; then
-        printf 'Режим: чтение и запись\nРазрешённая ветка: %s\n' "$branch"
-    elif [[ $writable = true ]]; then
+    if [[ $saved_writable = true && -n $saved_branch ]]; then
+        printf 'Режим: чтение и запись\nРазрешённая ветка: %s\n' "$saved_branch"
+    elif [[ $saved_writable = true ]]; then
         printf 'Режим: только чтение, запись включена без допустимой ветки\nРазрешённая ветка: нет\n'
     else
         printf 'Режим: только чтение\nРазрешённая ветка: нет\n'
@@ -181,22 +220,26 @@ configure_git() (
     configured
     local provider origin repository mode branch writable
     git_settings
+    require_gitlab_gateway
     write_git_config
 )
 setup_git() (
     local provider origin repository mode branch writable current update
+    local saved_provider saved_origin saved_repository saved_writable saved_branch
     git_settings
     update="make vm-git VM=$VM_NAME REPO=$repository"
     if [[ $provider = gitlab ]]; then update+=" GIT_PROVIDER=gitlab GIT_URL=$origin"; fi
     if [[ $writable = true ]]; then update+=" GIT_WRITE=1 GIT_WRITE_BRANCH=$branch"; fi
+    require_gitlab_gateway
     if ! test -e "$VM_STATE/git/repository.json"; then
         write_git_config create
         return
     fi
-    if ! current=$(saved_git_settings); then
+    if ! current=$(saved_git_settings) || ! parse_git_settings "$current"; then
         fail "Не удалось прочитать сохранённую настройку Git-шлюза $VM_NAME. Задайте её заново: $update"
     fi
-    if [[ $current != "$provider $origin $repository $writable $branch" ]]; then
+    if [[ "$saved_provider $saved_origin $saved_repository $saved_writable $saved_branch" != \
+        "$provider $origin $repository $writable $branch" ]]; then
         fail "Для $VM_NAME уже настроен Git-шлюз с другим провайдером, репозиторием или режимом записи. Сохранённая настройка не изменена. Чтобы заменить её, выполните: $update"
     fi
     printf 'Git-шлюз %s уже настроен для %s. Сохранённая настройка используется без изменений.\n' "$VM_NAME" "$repository"
@@ -278,8 +321,8 @@ setup() {
     docker run --rm --pull never --network none --cap-drop ALL --device /dev/kvm:/dev/kvm:rw \
         "$base_image" node -e 'require("node:fs").closeSync(require("node:fs").openSync("/dev/kvm", "r+"))' ||
         fail 'Docker не может открыть /dev/kvm.'
-    if test -n "${REPO:-}"; then setup_git; fi
     build_image
+    if test -n "${REPO:-}"; then setup_git; fi
     prepare_base
     if vm_running && compose exec -T vm sh -c 'grep -aFq "agent-docker-prepare.service: Failed" /guest/console.log'; then
         stop_guest

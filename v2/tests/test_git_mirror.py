@@ -463,7 +463,8 @@ class GitMirrorTest(unittest.TestCase):
                  'write': False, 'writeBranch': ''}
         accepted = [
             valid, {**valid, 'project': '/'.join(['g'] * 20)}, {**valid, 'project': 'g/' + 'p' * 255},
-            {**valid, 'origin': 'https://gitlab.fixture.invalid:8443/a.b/c_d'},
+            {**valid, 'origin': 'https://gitlab.fixture.invalid:65535/a.b/c_d'}, {**valid, 'origin': 'https://gitlab'},
+            {**valid, 'origin': 'https://scm-01.fixture.invalid'},
             {'repository': 'owner/project.atom', 'token': TOKEN, 'write': False, 'writeBranch': ''},
             {'provider': 'github', 'origin': 'https://github.com', 'repository': 'owner/project', 'token': TOKEN,
              'write': False, 'writeBranch': ''},
@@ -477,6 +478,10 @@ class GitMirrorTest(unittest.TestCase):
             {**valid, 'repository': 'group/project'}, {key: value for key, value in valid.items() if key != 'project'},
             {**valid, 'origin': 'https://user@gitlab.fixture.invalid'}, {**valid, 'origin': GITLAB_URL + '/..'},
             {**valid, 'origin': GITLAB_URL + '/./x'}, {**valid, 'origin': 'https://GitLab.fixture.invalid'},
+            {**valid, 'origin': 'https://10.0.0.5'}, {**valid, 'origin': 'https://10.0.0.5:8443/scm'},
+            {**valid, 'origin': 'https://github.com:443'}, {**valid, 'origin': 'https://www.github.com'},
+            {**valid, 'origin': 'https://github.com/scm'}, {**valid, 'origin': 'https://gitlab.fixture.invalid:65536'},
+            {**valid, 'origin': 'https://gitlab.fixture.invalid:0'}, ['not', 'an', 'object'], 'text', None,
             {**valid, 'project': 'group/project.atom'},
             {'provider': 'github', 'project': 'owner/project', 'token': TOKEN, 'write': False, 'writeBranch': ''},
             {'repository': 'owner/project', 'project': 'owner/project', 'token': TOKEN, 'write': False, 'writeBranch': ''},

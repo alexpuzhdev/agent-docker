@@ -15,7 +15,14 @@ cat > "$work/bin/docker" <<'EOF'
 printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
 if [[ -n ${FAKE_DOCKER_RUN_FAIL:-} && $1 = run ]]; then exit 125; fi
 case " $* " in
-    *' --settings /repository.json '*) node "$work/project/v2/git-gateway.cjs" --settings "$FAKE_GIT_CONFIG" ;;
+    *' --settings /repository.json '*)
+        if [[ -n ${FAKE_OLD_SETTINGS:-} ]]; then
+            current=$(node "$work/project/v2/git-gateway.cjs" --settings "$FAKE_GIT_CONFIG") || exit
+            read -r _ _ rest <<<"$current"
+            printf '%s\n' "$rest"
+            exit 0
+        fi
+        node "$work/project/v2/git-gateway.cjs" --settings "$FAKE_GIT_CONFIG" ;;
 esac
 EOF
 chmod +x "$work/bin/docker"
@@ -69,6 +76,15 @@ run_status
 check test "$status" -eq 0
 check has 'Репозиторий: owner/repository'
 check has 'Провайдер: GitHub'
+set +e
+output=$(FAKE_OLD_SETTINGS=1 target vm-git-status VM=vm-02 2>&1 </dev/null)
+status=$?
+set -e
+check test "$status" -eq 0
+check has 'Провайдер: GitHub'
+check has 'Репозиторий: owner/repository'
+check has 'Режим: только чтение'
+check lacks 'Репозиторий: false'
 check has 'Режим: только чтение'
 check lacks 'запись включена'
 check has 'Разрешённая ветка: нет'

@@ -30,8 +30,8 @@ PROVIDERS = {
                'repository': r'[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,254}(?:/[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,254}){1,19}'},
 }
 GITHUB = 'https://github.com'
-ORIGIN_PATTERN = (r'https://[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*'
-                  r'(?::[1-9][0-9]{0,4})?(?:/[a-zA-Z0-9_~-][a-zA-Z0-9_.~-]*)*')
+ORIGIN_PATTERN = (r'https://(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?'
+                  r'(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/[a-zA-Z0-9_~-][a-zA-Z0-9_.~-]*)*')
 READ_BRANCH = 'main'
 WORK_BRANCH = 'work'
 LAYOUT = 3
@@ -76,8 +76,15 @@ def output(repo, *args, **options):
     return git(repo, *args, **options).stdout.decode().strip()
 
 
+def github_host(origin):
+    host = origin.removeprefix('https://').split('/', 1)[0].split(':', 1)[0]
+    return host == 'github.com' or host.endswith('.github.com')
+
+
 def load_config():
     config = json.loads(CONFIG.read_text())
+    if not isinstance(config, dict):
+        raise ValueError('Некорректная конфигурация Git-шлюза.')
     token, write = config.get('token'), config.get('write')
     provider = config.get('provider', 'github')
     origin = config.get('origin', GITHUB if provider == 'github' else None)
@@ -88,7 +95,8 @@ def load_config():
             len(repository) > 1024 or not re.fullmatch(rules['repository'], repository) or
             not isinstance(token, str) or not re.fullmatch(rules['token'], token) or
             not isinstance(write, bool) or not isinstance(origin, str) or not re.fullmatch(ORIGIN_PATTERN, origin) or
-            len(origin) > 512 or (provider == 'github') != (origin == GITHUB)):
+            len(origin) > 512 or (provider == 'github') != (origin == GITHUB) or
+            (provider != 'github' and github_host(origin))):
         raise ValueError('Некорректная конфигурация Git-шлюза.')
     branch = config.get('writeBranch')
     writable = (write and isinstance(branch, str) and len(branch) <= 120 and branch not in ('main', 'master') and

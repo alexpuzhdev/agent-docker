@@ -22,7 +22,11 @@ const providers = {
     },
 };
 const github = 'https://github.com';
-const originPattern = /^https:\/\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*(?::[1-9][0-9]{0,4})?(?:\/[a-zA-Z0-9_~-][a-zA-Z0-9_.~-]*)*$/;
+const originPattern = /^https:\/\/(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:\/[a-zA-Z0-9_~-][a-zA-Z0-9_.~-]*)*$/;
+function githubHost(origin) {
+    const host = origin.slice('https://'.length).split('/', 1)[0].split(':', 1)[0];
+    return host === 'github.com' || host.endsWith('.github.com');
+}
 const routes = new Map();
 
 for (const operation of ['git-upload-pack', 'git-receive-pack']) {
@@ -55,7 +59,7 @@ function readRepository(path) {
         !rules.repository.test(repository) || rules.suffix.test(repository) ||
         typeof config.write !== 'boolean' || typeof config.token !== 'string' || !rules.token.test(config.token) ||
         typeof origin !== 'string' || origin.length > 512 || !originPattern.test(origin) ||
-        (provider === 'github') !== (origin === github)) {
+        (provider === 'github') !== (origin === github) || (provider !== 'github' && githubHost(origin))) {
         throw new Error('Некорректная конфигурация Git-шлюза.');
     }
     return { ...config, provider, origin, repository };
