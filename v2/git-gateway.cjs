@@ -46,10 +46,13 @@ function mirrorEnvironment(root) {
     return environment;
 }
 
-function synchronize(root) {
+function locate(root, command) {
     return new Promise(resolve => {
-        execFile('python3', [mirrorScript, 'sync'], { env: mirrorEnvironment(root), timeout: 300000 },
-            error => resolve(!error));
+        execFile('python3', [mirrorScript, command], { env: mirrorEnvironment(root), timeout: 300000 },
+            (error, stdout) => {
+                const location = String(stdout).trim();
+                resolve(!error && /^mirrors\/[0-9a-f]{64}$/.test(location) ? location : null);
+            });
     });
 }
 
@@ -86,7 +89,7 @@ function respond(backend, outgoing, stop) {
 }
 
 function createGitHandler(path = process.env.GIT_MIRROR_CONFIG ?? configPath,
-    root = process.env.GIT_MIRROR_ROOT ?? mirrorRoot, sync = synchronize) {
+    root = process.env.GIT_MIRROR_ROOT ?? mirrorRoot, locator = locate) {
     return async (incoming, outgoing) => {
         const route = routes.get(incoming.method + ' ' + incoming.url);
         if (!route) return outgoing.writeHead(404).end();
@@ -107,16 +110,16 @@ function createGitHandler(path = process.env.GIT_MIRROR_CONFIG ?? configPath,
         if (route.operation === 'git-receive-pack' && encoding && encoding !== 'identity') {
             return outgoing.writeHead(415).end();
         }
-        if (incoming.method === 'GET' && !(await sync(root))) {
-            return outgoing.writeHead(502).end();
-        }
+        const location = await locator(root, incoming.method === 'GET' ? 'sync' : 'resolve');
+        if (outgoing.destroyed || incoming.socket?.destroyed) return;
+        if (!location) return outgoing.writeHead(incoming.method === 'GET' ? 502 : 409).end();
 
         const backend = spawn('git', ['http-backend'], {
             env: {
                 ...mirrorEnvironment(root),
                 GIT_PROJECT_ROOT: root,
                 GIT_HTTP_EXPORT_ALL: '1',
-                PATH_INFO: route.pathInfo,
+                PATH_INFO: '/' + location + route.pathInfo,
                 QUERY_STRING: route.query,
                 REQUEST_METHOD: incoming.method,
                 CONTENT_TYPE: incoming.headers['content-type'] ?? '',

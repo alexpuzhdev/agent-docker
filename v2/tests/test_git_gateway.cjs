@@ -91,6 +91,29 @@ test('guest sees an anonymous snapshot and pushes only to the assigned branch', 
     assert.equal((await git('-C', upstream, 'log', '--format=%ae', '--all')).stdout.includes('guest@vm.invalid'), false);
     await assert.rejects(git('-C', copy, 'push', 'origin', ':refs/heads/work'));
 
+    const head = (await git('-C', copy, 'rev-parse', 'HEAD')).stdout.trim();
+    const other = path.join(root, 'other.git');
+    const otherSeed = path.join(root, 'other-seed');
+    await git('init', '--bare', '--initial-branch=main', other);
+    await git('init', '--initial-branch=main', otherSeed);
+    await fs.writeFile(path.join(otherSeed, 'other.txt'), 'other\n');
+    await git('-C', otherSeed, 'add', '-A');
+    await git('-C', otherSeed, ...owner, 'commit', '-m', 'other repository');
+    await git('-C', otherSeed, 'push', other, 'main');
+    process.env.GIT_MIRROR_REMOTE = 'file://' + other;
+    await fs.writeFile(config, JSON.stringify({ repository: 'owner/other', write: false, token, writeBranch: '' }));
+    const want = 'want ' + head + '\n';
+    const stale = await fetch(remote + '/git-upload-pack', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-git-upload-pack-request' },
+        body: (want.length + 4).toString(16).padStart(4, '0') + want + '00000009done\n',
+    });
+    assert.equal(stale.status, 409);
+    assert.ok(!(await stale.text()).includes('PACK'));
+    const fresh = path.join(root, 'fresh');
+    await git('clone', remote, fresh);
+    assert.deepEqual((await git('-C', fresh, 'ls-files')).stdout.split('\n').filter(Boolean), ['other.txt']);
+
     process.env.GIT_MIRROR_REMOTE = 'file://' + path.join(root, 'missing.git');
     const failed = await fetch(remote + '/info/refs?service=git-upload-pack');
     assert.equal(failed.status, 502);

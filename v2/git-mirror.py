@@ -1,5 +1,7 @@
 import base64
 import fcntl
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -12,18 +14,18 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-ROOT = Path(os.environ.get('GIT_MIRROR_ROOT', '/mirror'))
+ROOT = Path(os.environ.get('GIT_MIRROR_ROOT', '/mirror')).resolve()
 CONFIG = Path(os.environ.get('GIT_MIRROR_CONFIG', '/config/git/repository.json'))
 UPSTREAM = Path(os.environ.get('GIT_MIRROR_UPSTREAM', '/config/upstream'))
 REMOTE = os.environ.get('GIT_MIRROR_REMOTE', '')
-CLEAN = ROOT / 'clean.git'
-SOURCE = ROOT / 'source.git'
-STATE = ROOT / 'state.json'
+MIRRORS = ROOT / 'mirrors'
+LEGACY = (ROOT / 'clean.git', ROOT / 'source.git', ROOT / 'state.json')
+CLEAN = SOURCE = STATE = None
 ORIGIN = 'github.com'
 USERNAME = 'x-access-token'
 READ_BRANCH = 'main'
 WORK_BRANCH = 'work'
-LAYOUT = 2
+LAYOUT = 3
 IDENTITY = {
     'GIT_AUTHOR_NAME': 'agent-docker', 'GIT_AUTHOR_EMAIL': 'agent-docker@localhost',
     'GIT_COMMITTER_NAME': 'agent-docker', 'GIT_COMMITTER_EMAIL': 'agent-docker@localhost',
@@ -100,29 +102,85 @@ def locked():
         yield
 
 
+def secret():
+    path = ROOT / 'secret'
+    try:
+        value = path.read_bytes()
+    except FileNotFoundError:
+        value = b''
+    if len(value) == 32:
+        return value
+    value = os.urandom(32)
+    descriptor, draft = tempfile.mkstemp(dir=ROOT, prefix='secret-')
+    with os.fdopen(descriptor, 'wb') as handle:
+        handle.write(value)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(draft, path)
+    return value
+
+
+def select(config):
+    global CLEAN, SOURCE, STATE
+    key = {'layout': LAYOUT, 'repository': config['repository'], 'writeBranch': config['branch']}
+    name = hmac.new(secret(), json.dumps(key, sort_keys=True).encode(), hashlib.sha256).hexdigest()
+    home = MIRRORS / name
+    CLEAN, SOURCE, STATE = home / 'clean.git', home / 'source.git', home / 'state.json'
+    return key, home
+
+
+def remove(path):
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif path.is_symlink() or path.exists():
+        path.unlink()
+
+
+def retire(home):
+    scratch = ROOT / 'tmp'
+    scratch.mkdir(parents=True, exist_ok=True)
+    stale = [path for path in LEGACY if path.is_symlink() or path.exists()]
+    stale += [path for path in ROOT.glob('tmp?*') if path.is_file()]
+    if MIRRORS.is_dir():
+        stale += [other for other in MIRRORS.iterdir() if other != home]
+    for path in stale:
+        try:
+            os.rename(path, scratch / f'retired-{os.urandom(8).hex()}')
+        except OSError:
+            remove(path)
+    for path in scratch.glob('retired-*'):
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+
+
+def saved_state(key):
+    try:
+        state = json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) and state.get('key') == key and CLEAN.is_dir() else None
+
+
 def save_state(state):
-    with tempfile.NamedTemporaryFile('w', dir=ROOT, delete=False) as draft:
+    with tempfile.NamedTemporaryFile('w', dir=STATE.parent, delete=False) as draft:
         json.dump(state, draft)
     os.replace(draft.name, STATE)
 
 
-def load_state(config, reset=True):
-    key = {'layout': LAYOUT, 'repository': config['repository'], 'writeBranch': config['branch']}
-    state = json.loads(STATE.read_text()) if STATE.exists() else None
-    if state is None or state.get('key') != key:
-        if not reset:
-            raise Refused('Настройка Git-шлюза изменилась. Выполните git fetch и повторите push.')
+def load_state(key):
+    state = saved_state(key)
+    if state is None:
         for path in (CLEAN, SOURCE, STATE):
-            if path.is_dir():
-                shutil.rmtree(path)
-            elif path.exists():
-                path.unlink()
+            remove(path)
         state = {'key': key, 'branches': {}}
     return state
 
 
 def prepare():
     (ROOT / 'tmp').mkdir(parents=True, exist_ok=True)
+    STATE.parent.mkdir(parents=True, exist_ok=True)
     if not SOURCE.exists():
         git(ROOT, 'init', '-q', '--bare', str(SOURCE))
     if not CLEAN.exists():
@@ -223,9 +281,11 @@ def sync_branch(state, name, upstream, base):
 
 
 def sync():
-    config = load_config()
     with locked():
-        state = load_state(config)
+        config = load_config()
+        key, home = select(config)
+        retire(home)
+        state = load_state(key)
         prepare()
         branch = config['branch']
         head, write = fetch(config, branch)
@@ -240,6 +300,16 @@ def sync():
                 git(SOURCE, 'update-ref', 'refs/source/base', head)
                 state['branches'][WORK_BRANCH] = {'upstream': None, 'base': head, 'clean': main}
         save_state(state)
+        print(home.relative_to(ROOT))
+
+
+def resolve():
+    with locked():
+        key, home = select(load_config())
+        retire(home)
+        if saved_state(key) is None:
+            raise Refused('Зеркало текущего назначения ещё не готово.')
+        print(home.relative_to(ROOT))
 
 
 def export(config, state, old, new):
@@ -286,9 +356,12 @@ def export(config, state, old, new):
 
 def receive():
     updates = [line.split() for line in sys.stdin.read().splitlines() if line.strip()]
-    config = load_config()
     with locked():
-        state = load_state(config, reset=False)
+        config = load_config()
+        key, _ = select(config)
+        state = saved_state(key)
+        if state is None or Path(os.environ.get('GIT_DIR', '.')).resolve() != CLEAN.resolve():
+            raise Refused('Назначение репозитория изменилось. Выполните git fetch и повторите push.')
         branch = config['branch']
         if not branch or len(updates) != 1 or updates[0][2] != f'refs/heads/{WORK_BRANCH}':
             raise Refused(f'Запись разрешена только в ветку {WORK_BRANCH}, по одной ветке за push.')
@@ -300,9 +373,9 @@ def receive():
 
 
 def main():
-    commands = {'sync': sync, 'receive': receive}
+    commands = {'sync': sync, 'resolve': resolve, 'receive': receive}
     if len(sys.argv) != 2 or sys.argv[1] not in commands:
-        sys.exit('Использование: git-mirror.py sync|receive')
+        sys.exit('Использование: git-mirror.py sync|resolve|receive')
     command = commands[sys.argv[1]]
     try:
         command()
