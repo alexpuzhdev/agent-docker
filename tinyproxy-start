@@ -1,0 +1,55 @@
+#!/bin/sh
+set -eu
+umask 077
+
+policy_dir=/run/proxy-config
+if [ ! -f "$policy_dir/allowed-domains" ] || [ ! -r "$policy_dir/allowed-domains" ]; then
+    echo 'Файл allowed-domains должен быть доступен на чтение.' >&2
+    exit 1
+fi
+
+filter=$(mktemp)
+if ! LC_ALL=C awk '
+    { sub(/#.*/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "") }
+    /^$/ { next }
+    /^([*]\.)?([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/ && length($0) <= 253 { print; next }
+    { print "Неверный домен в allowed-domains, строка " NR > "/dev/stderr"; exit 1 }
+' "$policy_dir/allowed-domains" > "$filter"; then
+    exit 1
+fi
+
+listen_ip=$(getent ahostsv4 agent-proxy | awk 'NR == 1 { print $1 }')
+if [ -z "$listen_ip" ]; then
+    echo 'Не удалось определить внутренний IP Tinyproxy.' >&2
+    exit 1
+fi
+
+config=$(mktemp)
+stat_host=$(cat /proc/sys/kernel/random/uuid).invalid
+cat > "$config" <<CONFIG
+Listen $listen_ip
+Port 8888
+StatHost "$stat_host"
+Timeout 600
+MaxClients 64
+LogLevel Warning
+ConnectPort 443
+Filter "$filter"
+FilterType fnmatch
+FilterDefaultDeny Yes
+CONFIG
+
+if [ -e "$policy_dir/upstream" ] || [ -L "$policy_dir/upstream" ]; then
+    if [ ! -f "$policy_dir/upstream" ] || ! upstream=$(LC_ALL=C awk '
+        NR != 1 || $0 !~ /^[[:alnum:].-]+:[0-9]+$/ { exit 1 }
+        { split($0, address, ":"); if (address[2] < 1 || address[2] > 65535) exit 1 }
+        { print }
+        END { if (NR != 1) exit 1 }
+    ' "$policy_dir/upstream"); then
+        echo 'Укажите в файле upstream одну строку в формате host:port.' >&2
+        exit 1
+    fi
+    printf 'Upstream http %s\n' "$upstream" >> "$config"
+fi
+
+exec tinyproxy -d -c "$config"

@@ -1,0 +1,80 @@
+name: agent-docker
+
+services:
+  agents:
+    build:
+      context: .
+      target: agents
+      args:
+        AGENT_UID: ${AGENT_UID:-1000}
+        AGENT_GID: ${AGENT_GID:-1000}
+    init: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    depends_on:
+      proxy:
+        condition: service_healthy
+    environment:
+      AGENT_CLAUDE_CODE_VERSION: ${AGENT_CLAUDE_CODE_VERSION:-latest}
+      AGENT_CODEX_VERSION: ${AGENT_CODEX_VERSION:-latest}
+      HTTP_PROXY: &proxy http://agent-proxy:8888
+      HTTPS_PROXY: *proxy
+      http_proxy: *proxy
+      https_proxy: *proxy
+      NO_PROXY: &no_proxy localhost,127.0.0.1,::1
+      no_proxy: *no_proxy
+    volumes:
+      - type: bind
+        source: ${PROJECTS_DIR:?Укажите PROJECTS_DIR в .env}
+        target: /workspace
+        bind:
+          create_host_path: false
+      - agent-home:/home/node
+    networks:
+      - isolated
+
+  proxy:
+    build:
+      context: .
+      target: proxy
+    init: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    volumes:
+      - type: bind
+        source: ${PROXY_CONFIG_DIR:?Укажите PROXY_CONFIG_DIR в .env}
+        target: /run/proxy-config
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      isolated:
+        aliases:
+          - agent-proxy
+      egress: {}
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/agent-proxy/8888"]
+      interval: 5s
+      timeout: 4s
+      retries: 10
+
+networks:
+  isolated:
+    driver: bridge
+    internal: true
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.inhibit_ipv4: "true"
+  egress:
+    driver: bridge
+
+volumes:
+  agent-home:
