@@ -207,6 +207,12 @@ def sync_branch(state, name, upstream, base):
     if entry and entry['upstream'] == upstream and entry['base'] == base and entry['clean'] == tip:
         return
     tree = sanitized_tree(base)
+    pending = entry and entry['clean'] != tip and ref(CLEAN, entry['clean'])
+    if (pending and (not tip or not git(CLEAN, 'merge-base', '--is-ancestor', tip, pending, check=False).returncode) and
+            output(CLEAN, 'rev-parse', pending + '^{tree}') == tree):
+        git(CLEAN, 'update-ref', f'refs/heads/{name}', pending)
+        state['branches'][name] = {'upstream': upstream, 'base': base, 'clean': pending}
+        return
     if tip and output(CLEAN, 'rev-parse', tip + '^{tree}') == tree:
         commit = tip
     else:
@@ -272,6 +278,7 @@ def export(config, state, old, new):
     lease = f'--force-with-lease=refs/heads/{branch}:{current or ""}'
     if git(SOURCE, 'push', '-q', url, f'{tip}:refs/heads/{branch}', lease, env=env, check=False).returncode:
         raise Refused('Репозиторий не принял изменения. Выполните git pull --rebase и повторите push.')
+    git(SOURCE, 'update-ref', 'refs/source/write', tip)
     state['branches'][branch] = {'upstream': tip, 'base': tip, 'clean': new}
 
 

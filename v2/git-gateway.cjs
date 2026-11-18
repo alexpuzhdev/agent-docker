@@ -53,13 +53,13 @@ function synchronize(root) {
     });
 }
 
-function respond(backend, outgoing) {
+function respond(backend, outgoing, stop) {
     let header = Buffer.alloc(0);
     const receive = chunk => {
         header = Buffer.concat([header, chunk]);
         const separator = header.indexOf('\r\n\r\n');
         if (separator < 0) {
-            if (header.length > 65536) backend.stdout.destroy();
+            if (header.length > 65536) stop();
             return;
         }
         backend.stdout.removeListener('data', receive);
@@ -142,10 +142,13 @@ function createGitHandler(path = process.env.GIT_MIRROR_CONFIG ?? configPath,
             clearTimeout(deadline);
         });
         backend.on('error', () => {
+            clearTimeout(deadline);
             if (!outgoing.headersSent) outgoing.writeHead(502).end();
             else outgoing.destroy();
         });
-        outgoing.on('close', stop);
+        outgoing.on('close', () => {
+            if (!outgoing.writableFinished && route.operation !== 'git-receive-pack') stop();
+        });
         let received = 0;
         incoming.on('data', chunk => {
             received += chunk.length;
@@ -158,7 +161,7 @@ function createGitHandler(path = process.env.GIT_MIRROR_CONFIG ?? configPath,
         backend.stdin.on('error', stop);
         backend.stdout.on('error', stop);
         incoming.pipe(backend.stdin);
-        respond(backend, outgoing);
+        respond(backend, outgoing, stop);
     };
 }
 

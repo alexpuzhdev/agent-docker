@@ -37,7 +37,7 @@ class GitMirrorTest(unittest.TestCase):
         (self.owner / 'data.bin').write_bytes(bytes(range(256)) * 4)
         self.git(self.owner, 'add', '-A')
         self.git(self.owner, 'update-index', '--add', '--cacheinfo', '160000,' + 'a' * 40 + ',vendor/lib')
-        self.commit(self.owner, 'Merge pull request #7 from ivan-petrov/secret-feature', OWNER)
+        self.git(self.owner, 'commit', '-q', '-m', 'Merge pull request #7 from ivan-petrov/secret-feature', env=OWNER)
         self.git(self.owner, 'push', '-q', 'origin', 'main')
         self.configure(write=False)
 
@@ -95,6 +95,9 @@ class GitMirrorTest(unittest.TestCase):
                          ['agent-docker <agent-docker@localhost> 946684800|Снимок репозитория'])
         files = set(self.git(guest, 'ls-files').stdout.splitlines())
         self.assertEqual(files, {'README.md', 'src/app.py', 'data.bin'})
+        self.assertIn('160000 commit ' + 'a' * 40 + '\tvendor/lib',
+                      self.git(self.upstream, 'ls-tree', '-r', 'main').stdout)
+        self.assertNotIn(bytes.fromhex('a' * 40), self.all_objects(self.mirror / 'clean.git'))
         self.assertEqual(self.git(guest, 'ls-remote', 'origin').stdout.count('\n'), 2)
         blob = self.all_objects(self.mirror / 'clean.git')
         upstream_head = self.git(self.upstream, 'rev-parse', 'main').stdout.strip()
@@ -206,6 +209,7 @@ class GitMirrorTest(unittest.TestCase):
         self.git(guest, 'update-index', '--add', '--cacheinfo', '160000,' + 'b' * 40 + ',vendor/guest')
         self.git(guest, 'commit', '-q', '-m', 'gitlink', env=GUEST)
         result = self.push(guest, 'HEAD:agent/work', check=False)
+        self.assertNotEqual(result.returncode, 0)
         self.assertIn('подмодулей', result.stderr)
         self.assertEqual(self.git(self.upstream, 'ls-remote', '--heads', '.').stdout.count('\n'), 1)
         self.assertEqual(self.git(self.mirror / 'clean.git', 'config', 'receive.maxInputSize').stdout.strip(), '256m')
@@ -216,17 +220,38 @@ class GitMirrorTest(unittest.TestCase):
         guest = self.guest_clone('agent/work')
         before = self.git(guest, 'rev-parse', 'HEAD').stdout.strip()
         self.write(guest, {'src/app.py': 'print("lost")\n'})
-        self.commit(guest, 'lost ref', GUEST)
+        self.commit(guest, 'lost one', GUEST)
+        self.write(guest, {'src/app.py': 'print("lost twice")\n'})
+        pushed = self.commit(guest, 'lost ref', GUEST)
         self.push(guest, 'HEAD:agent/work')
         self.git(self.mirror / 'clean.git', 'update-ref', 'refs/heads/agent/work', before)
         self.sync()
+        self.assertEqual(self.git(self.mirror / 'clean.git', 'rev-parse', 'agent/work').stdout.strip(), pushed)
         self.git(guest, 'pull', '-q', '--rebase', env=GUEST)
-        self.assertEqual((guest / 'src/app.py').read_text(), 'print("lost")\n')
+        self.assertEqual(self.git(guest, 'rev-parse', 'HEAD').stdout.strip(), pushed)
         self.write(guest, {'next.txt': 'next\n'})
         self.commit(guest, 'after recovery', GUEST)
         self.push(guest, 'HEAD:agent/work')
-        self.assertEqual([line.split('|')[1] for line in self.upstream_log('agent/work')[:2]],
-                         ['after recovery', 'lost ref'])
+        self.assertEqual([line.split('|')[1] for line in self.upstream_log('agent/work')],
+                         ['after recovery', 'lost ref', 'lost one', 'Merge pull request #7 from ivan-petrov/secret-feature'])
+
+    def test_rebuilt_snapshot_after_lost_objects(self):
+        self.configure(write=True, branch='agent/work')
+        self.sync()
+        guest = self.guest_clone('agent/work')
+        before = self.git(guest, 'rev-parse', 'HEAD').stdout.strip()
+        self.write(guest, {'src/app.py': 'print("gone")\n'})
+        self.commit(guest, 'gone', GUEST)
+        self.push(guest, 'HEAD:agent/work')
+        state_path = self.mirror / 'state.json'
+        state = json.loads(state_path.read_text())
+        state['branches']['agent/work']['clean'] = 'f' * 40
+        state_path.write_text(json.dumps(state))
+        self.git(self.mirror / 'clean.git', 'update-ref', 'refs/heads/agent/work', before)
+        self.sync()
+        tip = self.git(self.mirror / 'clean.git', 'log', '-1', '--format=%an|%P', 'agent/work').stdout.strip()
+        self.assertEqual(tip, f'agent-docker|{before}')
+        self.assertEqual(self.git(self.mirror / 'clean.git', 'show', 'agent/work:src/app.py').stdout, 'print("gone")\n')
 
     def test_upstream_change_requires_rebase(self):
         self.configure(write=True, branch='agent/work')

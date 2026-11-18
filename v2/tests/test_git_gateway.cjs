@@ -75,6 +75,10 @@ test('guest sees an anonymous snapshot and pushes only to the assigned branch', 
     assert.equal((await fetch(receivePack, {
         method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '0000',
     })).status, 415);
+    assert.equal((await fetch(receivePack, {
+        method: 'POST', body: '0000',
+        headers: { 'Content-Type': 'application/x-git-receive-pack-request', 'Content-Encoding': 'gzip' },
+    })).status, 415);
     await git('-C', copy, 'fetch', 'origin');
     await git('-C', copy, ...guest, 'rebase', 'origin/agent/work');
     await assert.rejects(git('-C', copy, 'push', 'origin', 'HEAD:main'), /назначенную ветку/);
