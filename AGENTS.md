@@ -7,6 +7,7 @@
 - Проверка shell-сценариев: `bash -n v2/manage.sh v2/start-vm.sh v2/guest.sh v2/prepare-base.sh v2/prepare-guest.sh v2/serial-profile.sh`.
 - Проверка JS: `node --check` для каждого изменённого файла `.cjs`.
 - Проверка Git-шлюза: `node --test v2/tests/test_git_gateway.cjs`.
+- Проверка журнала SNI: `node --test v2/tests/test_sni_log.cjs`.
 - Проверка настройки Git через Make: `bash v2/tests/test_vm_setup_git.sh`.
 - Проверка статуса Git-шлюза: `bash v2/tests/test_vm_git_status.sh`.
 - Проверка гостевой консоли: `python3 -m unittest discover -s v2/tests -v`.

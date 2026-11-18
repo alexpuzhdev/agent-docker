@@ -10,6 +10,12 @@ services:
     command: ["node", "/opt/agent-docker/gateway.cjs"]
     environment:
       GATEWAY_IP: ${GATEWAY_IP:?}
+      GATEWAY_SNI_LOG: ${GATEWAY_SNI_LOG:-0}
+    logging:
+      driver: json-file
+      options:
+        max-size: 1m
+        max-file: "3"
     volumes:
       - ${VM_STATE:?}/upstream:/config/upstream:ro
       - ${VM_STATE:?}/git:/config/git:ro

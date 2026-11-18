@@ -8,10 +8,14 @@ import uuid
 from pathlib import Path
 
 
+SERIALS = ('system', 'board', 'chassis', 'disk')
+
+
 def generate_identity():
     octets = bytearray(secrets.token_bytes(6))
     octets[0] = (octets[0] & 0xfc) | 0x02
-    return {'uuid': str(uuid.uuid4()), 'mac': octets.hex(':')}
+    serials = {name: secrets.token_hex(10).upper() for name in SERIALS}
+    return {'uuid': str(uuid.uuid4()), 'mac': octets.hex(':'), 'serials': serials}
 
 
 def publish_profile(path, profile):
@@ -44,7 +48,14 @@ def read_identity(path, expected):
         raise ValueError('В профиле VM ожидался UUID версии 4.')
     if not isinstance(mac, str) or not re.fullmatch(r'[0-9a-f][26ae](?::[0-9a-f]{2}){5}', mac):
         raise ValueError('В профиле VM ожидался локально назначенный одноадресный MAC.')
-    return vm_uuid, mac
+    if 'serials' not in identity:
+        return vm_uuid, mac
+    serials = identity['serials']
+    if (not isinstance(serials, dict) or set(serials) != set(SERIALS) or
+            not all(isinstance(serials[name], str) and re.fullmatch(r'[0-9A-F]{20}', serials[name])
+                    for name in SERIALS)):
+        raise ValueError('В профиле VM ожидались серийные номера из 20 шестнадцатеричных символов.')
+    return (vm_uuid, mac, *(serials[name] for name in SERIALS))
 
 
 def main():
