@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -82,7 +83,7 @@ func TestRenderMenuFitsTerminal(t *testing.T) {
 			Resources: &Resources{4, 8192, 40},
 			Git:       &Git{Provider: "github", Repository: "owner/name", Write: true, Branch: "work"}},
 	}
-	frame := renderMenu(vms, 1, 40, 24, "/home/user/agent-docker", "сообщение")
+	frame := renderMenu(vms, 1, 40, 24, "/home/user/agent-docker", "сообщение", time.Now())
 	lines := strings.Split(strings.TrimRight(frame, "\r\n"), "\r\n")
 	for _, line := range lines {
 		if utf8.RuneCountInString(line) > 40 {
@@ -101,7 +102,7 @@ func TestRenderMenuFitsTerminal(t *testing.T) {
 }
 
 func TestRenderMenuEmptyList(t *testing.T) {
-	frame := renderMenu(nil, 0, 60, 24, "/root", "")
+	frame := renderMenu(nil, 0, 60, 24, "/root", "", time.Now())
 	if !strings.Contains(frame, "клавишей n") {
 		t.Fatalf("пустой список должен подсказывать создание: %s", frame)
 	}
@@ -113,7 +114,7 @@ func TestRenderMenuScrollsLongList(t *testing.T) {
 		vms = append(vms, VM{Name: "vm-" + string(rune('0'+index/10)) + string(rune('0'+index%10)),
 			StatusKnown: true, Proxy: true, Resources: &Resources{2, 4096, 12}})
 	}
-	frame := renderMenu(vms, 39, 80, 20, "/root", "")
+	frame := renderMenu(vms, 39, 80, 20, "/root", "", time.Now())
 	lines := strings.Split(strings.TrimRight(frame, "\r\n"), "\r\n")
 	if len(lines) > 20 {
 		t.Fatalf("кадр из %d строк не помещается в окно 20", len(lines))

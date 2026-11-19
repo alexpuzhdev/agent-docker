@@ -19,7 +19,9 @@ const (
 	kindManage  = "manage"
 	kindList    = "list"
 	kindStatus  = "status"
+	kindShell   = "shell"
 	kindMenu    = "menu"
+	kindResume  = "resume"
 	kindHelp    = "help"
 	kindVersion = "version"
 )
@@ -36,7 +38,7 @@ type action struct {
 // parseArgs превращает аргументы командной строки в действие.
 func parseArgs(args []string) (action, error) {
 	if len(args) == 0 {
-		return action{kind: kindMenu}, nil
+		return action{kind: kindShell}, nil
 	}
 	name := args[0]
 	rest := args[1:]
@@ -47,6 +49,9 @@ func parseArgs(args []string) (action, error) {
 		return bare(kindVersion, name, rest)
 	case "menu":
 		return bare(kindMenu, name, rest)
+	case "go", "resume":
+		vm, err := singleVM(name, rest)
+		return action{kind: kindResume, vm: vm}, err
 	case "ls", "list":
 		return bare(kindList, name, rest)
 	case "status":

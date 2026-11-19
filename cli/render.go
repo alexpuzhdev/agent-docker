@@ -3,11 +3,12 @@ package main
 import (
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
 // listHeaders — заголовки таблицы agd ls.
-var listHeaders = []string{"VM", "СОСТОЯНИЕ", "CPU/RAM/ДИСК", "ПРОКСИ", "GIT"}
+var listHeaders = []string{"VM", "СОСТОЯНИЕ", "CPU/RAM/ДИСК", "ПРОКСИ", "GIT", "СЕССИЯ"}
 
 // statusText описывает состояние гостя одним словом. Строка docker ps не
 // переводится дословно: её полный текст показывает agd status.
@@ -53,12 +54,12 @@ func gitText(vm VM) string {
 }
 
 // vmRow собирает строку таблицы для одного гостя.
-func vmRow(vm VM) []string {
+func vmRow(vm VM, now time.Time) []string {
 	proxy := "нет"
 	if vm.Proxy {
 		proxy = "есть"
 	}
-	return []string{vm.Name, statusText(vm), resourcesText(vm), proxy, gitText(vm)}
+	return []string{vm.Name, statusText(vm), resourcesText(vm), proxy, gitText(vm), sessionText(vm, now)}
 }
 
 // renderList строит таблицу гостей. Пустой список печатает подсказку.
@@ -67,8 +68,9 @@ func renderList(vms []VM) string {
 		return "Гостей пока нет. Создайте первого: agd new vm-01\n"
 	}
 	rows := make([][]string, 0, len(vms))
+	now := time.Now()
 	for _, vm := range vms {
-		rows = append(rows, vmRow(vm))
+		rows = append(rows, vmRow(vm, now))
 	}
 	return renderTable(listHeaders, rows)
 }
@@ -133,6 +135,38 @@ func renderStatus(vm VM) string {
 		builder.WriteString("Прокси: не настроен\n")
 	}
 	builder.WriteString("Git: " + gitText(vm) + "\n")
+	builder.WriteString("Последняя сессия: " + sessionText(vm, time.Now()) + "\n")
 	builder.WriteString("Каталог состояния: " + vm.Dir + "\n")
 	return builder.String()
+}
+
+// panelHints — подсказка по командам под списком гостей.
+var panelHints = []string{
+	"/go vm-01 вернуться в сессию   /claude vm-01 запустить агента   /shell vm-01 оболочка",
+	"/ls обновить   /up /stop /new /rm   /git /logs /profile   /menu   /help   /quit",
+}
+
+// renderPanel рисует список гостей и подсказки над строкой команд. Строки
+// разделяются \r\n: терминал находится в неформатированном режиме.
+func renderPanel(vms []VM, root string, width int, now time.Time) string {
+	if width < 20 {
+		width = 20
+	}
+	lines := []string{truncate("agent-docker "+version, width), truncate(root, width), ""}
+	if len(vms) == 0 {
+		lines = append(lines, truncate("  гостей нет, создайте первого: /new vm-01", width))
+	} else {
+		rows := make([][]string, 0, len(vms))
+		for _, vm := range vms {
+			rows = append(rows, vmRow(vm, now))
+		}
+		for _, row := range strings.Split(strings.TrimRight(renderTable(listHeaders, rows), "\n"), "\n") {
+			lines = append(lines, truncate("  "+row, width))
+		}
+	}
+	lines = append(lines, "")
+	for _, hint := range panelHints {
+		lines = append(lines, truncate(hint, width))
+	}
+	return strings.Join(lines, "\r\n") + "\r\n"
 }

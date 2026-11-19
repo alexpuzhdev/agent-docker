@@ -43,8 +43,12 @@ func execute(args []string, console streams) int {
 		return showList(root, console)
 	case kindStatus:
 		return showStatus(root, act.vm, console)
+	case kindShell:
+		return runShell(root, console)
 	case kindMenu:
 		return runMenu(root, console)
+	case kindResume:
+		return resumeSession(root, act.vm, console)
 	default:
 		return performManage(root, act, console)
 	}
@@ -119,6 +123,30 @@ func showStatus(root, name string, console streams) int {
 	return 1
 }
 
+// resumeSession возвращает пользователя в гостя: к работающему агенту через
+// консоль, а в гостя без сессий — запуском агента.
+func resumeSession(root, name string, console streams) int {
+	vms, err := inventory(root, console)
+	if err != nil {
+		fmt.Fprintln(console.errors, err)
+		return 1
+	}
+	for _, vm := range vms {
+		if vm.Name != name {
+			continue
+		}
+		if !vm.Configured() {
+			fmt.Fprintf(console.errors, "%s ещё не настроена: agd new %s\n", name, name)
+			return 1
+		}
+		target := lastSession(vm)
+		return performManage(root, action{kind: kindManage, vm: name, target: target,
+			environment: map[string]string{"VM": name}}, console)
+	}
+	fmt.Fprintf(console.errors, "%s не найдена. Создайте её: agd new %s\n", name, name)
+	return 1
+}
+
 // performManage выполняет цель manage.sh, спросив подтверждение там, где
 // действие необратимо.
 func performManage(root string, act action, console streams) int {
@@ -126,5 +154,6 @@ func performManage(root string, act action, console streams) int {
 		fmt.Fprintln(console.output, "Отменено.")
 		return 1
 	}
+	noteSession(root, act.vm, act.target, act.environment["PROJECT"], console)
 	return exitCode(runManage(root, act.target, act.environment))
 }

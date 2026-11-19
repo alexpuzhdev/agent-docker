@@ -2,13 +2,14 @@ package main
 
 import (
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
 // hints — подсказки по клавишам, по две строки, чтобы помещаться в узкий терминал.
 var hints = []string{
-	"c консоль   a Claude   u запустить   s остановить   n создать",
-	"g git       l логи     p профиль     d удалить      r обновить   q выход",
+	"Enter продолжить сессию   c оболочка   a Claude   u запустить",
+	"s остановить   n создать   g git   l логи   p профиль   d удалить   q выход",
 }
 
 // menuAction — действие, выбранное клавишей в меню.
@@ -84,13 +85,13 @@ func windowStart(cursor, visible, count int) int {
 
 // renderMenu строит кадр меню. Строки разделяются \r\n: терминал находится в
 // неформатированном режиме и сам каретку не возвращает.
-func renderMenu(vms []VM, cursor, width, height int, root, notice string) string {
+func renderMenu(vms []VM, cursor, width, height int, root, notice string, now time.Time) string {
 	if width < 20 {
 		width = 20
 	}
 	rows := make([][]string, 0, len(vms))
 	for _, vm := range vms {
-		rows = append(rows, vmRow(vm))
+		rows = append(rows, vmRow(vm, now))
 	}
 	table := strings.Split(strings.TrimRight(renderTable(listHeaders, rows), "\n"), "\n")
 	header := table[0]

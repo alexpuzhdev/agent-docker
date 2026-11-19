@@ -49,6 +49,13 @@ with (workspace / 'console.lock').open('a') as lock, socket.socket(socket.AF_UNI
     saved = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
+        if operation == 'vm-console':
+            # Возврат к работающей сессии: хвост журнала показывает, что
+            # происходило в госте, пока консоль была отключена.
+            with serial_log.open('rb') as log:
+                end = log.seek(0, os.SEEK_END)
+                log.seek(max(0, end - 4096))
+                os.write(sys.stdout.fileno(), log.read())
         if operation != 'vm-console':
             size = os.get_terminal_size(fd)
             command = f'stty rows {max(size.lines, 24)} cols {max(size.columns, 80)}; export DISABLE_UPDATES=1; mkdir -p "$HOME/projects"; cd "$HOME/projects"'

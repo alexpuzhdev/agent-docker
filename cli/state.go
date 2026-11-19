@@ -46,6 +46,7 @@ type VM struct {
 	GuestStatus string
 	ProxyStatus string
 	StatusKnown bool
+	Session     *Session
 }
 
 // Configured сообщает, прошла ли VM первоначальную настройку.
@@ -109,6 +110,7 @@ func loadVM(dir, name string) VM {
 	if _, err := os.Stat(filepath.Join(dir, "upstream")); err == nil {
 		vm.Proxy = true
 	}
+	vm.Session = readSession(dir)
 	assignment, err := readGit(filepath.Join(dir, "git", "repository.json"))
 	switch {
 	case err == nil && assignment != nil:

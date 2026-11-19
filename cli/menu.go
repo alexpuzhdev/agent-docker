@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // terminal переключает режим ввода через stty: меню читает отдельные
@@ -77,20 +78,29 @@ func interactive() bool {
 	return err == nil
 }
 
+// readBytes читает очередную порцию ввода терминала.
+func readBytes() ([]byte, error) {
+	buffer := make([]byte, 32)
+	count, err := os.Stdin.Read(buffer)
+	if err != nil {
+		return nil, err
+	}
+	if count == 0 {
+		return nil, io.EOF
+	}
+	return buffer[:count], nil
+}
+
 // readKey читает одну клавишу, разбирая последовательности стрелок.
 func readKey() (byte, error) {
-	buffer := make([]byte, 8)
-	count, err := os.Stdin.Read(buffer)
+	data, err := readBytes()
 	if err != nil {
 		return 0, err
 	}
-	if count == 0 {
-		return 0, io.EOF
+	if len(data) >= 3 && data[0] == 27 && data[1] == '[' {
+		return data[2], nil
 	}
-	if count >= 3 && buffer[0] == 27 && buffer[1] == '[' {
-		return buffer[2], nil
-	}
-	return buffer[0], nil
+	return data[0], nil
 }
 
 // runMenu показывает список окружений и выполняет над ними действия.
@@ -119,7 +129,8 @@ func runMenu(root string, console streams) int {
 		}
 		cursor = moveCursor(cursor, 0, len(vms))
 		height, width := terminalSize()
-		fmt.Fprint(console.output, "\x1b[2J\x1b[H"+renderMenu(vms, cursor, width, height, root, notice))
+		fmt.Fprint(console.output, "\x1b[2J\x1b[H"+
+			renderMenu(vms, cursor, width, height, root, notice, time.Now()))
 		key, err := readKey()
 		if err != nil {
 			return 0
@@ -145,10 +156,7 @@ func runMenu(root string, console streams) int {
 			continue
 		}
 		target, known := keyActions[key]
-		if key == 13 {
-			target, known = "vm-console", true
-		}
-		if !known {
+		if !known && key != 13 {
 			continue
 		}
 		if len(vms) == 0 {
@@ -156,7 +164,12 @@ func runMenu(root string, console streams) int {
 			continue
 		}
 		selected := vms[cursor]
-		if err := outside(screen, console, func() { menuTarget(root, target, selected, console) }); err != nil {
+		project := ""
+		if key == 13 {
+			// Enter возвращает туда, где работали в прошлый раз.
+			target = lastSession(selected)
+		}
+		if err := outside(screen, console, func() { menuTarget(root, target, selected, project, console) }); err != nil {
 			fmt.Fprintln(console.errors, err)
 			return 1
 		}
@@ -176,8 +189,11 @@ func outside(screen *terminal, console streams, body func()) error {
 }
 
 // menuTarget запускает выбранное действие над гостем.
-func menuTarget(root, target string, vm VM, console streams) {
+func menuTarget(root, target string, vm VM, project string, console streams) {
 	environment := map[string]string{"VM": vm.Name}
+	if project != "" {
+		environment["PROJECT"] = project
+	}
 	switch target {
 	case "vm-logs":
 		environment["LOG_TAIL"] = "50"
@@ -191,6 +207,7 @@ func menuTarget(root, target string, vm VM, console streams) {
 			return
 		}
 	}
+	noteSession(root, vm.Name, target, project, console)
 	if err := runManage(root, target, environment); err != nil {
 		fmt.Fprintln(console.errors, err)
 	}
