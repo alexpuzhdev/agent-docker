@@ -8,6 +8,7 @@ import (
 )
 
 func main() {
+	colors = newPalette()
 	console := streams{input: bufio.NewReader(os.Stdin), output: os.Stdout, errors: os.Stderr}
 	os.Exit(execute(os.Args[1:], console))
 }

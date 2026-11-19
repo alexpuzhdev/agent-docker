@@ -3,7 +3,6 @@ package main
 import (
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 // hints — подсказки по клавишам, по две строки, чтобы помещаться в узкий терминал.
@@ -107,21 +106,21 @@ func renderMenu(vms []VM, cursor, width, height int, root, notice string, now ti
 	}
 	start := windowStart(cursor, visible, len(body))
 	lines := []string{
-		truncate("agd "+version+" — agent-docker", width),
-		truncate(root, width),
+		truncate(colors.accent("agd "+version+" — agent-docker"), width),
+		truncate(colors.muted(root), width),
 		"",
 		truncate("  "+header, width),
 	}
 	for index := start; index < len(body) && index < start+visible; index++ {
 		prefix := "  "
 		if index == cursor && len(vms) > 0 {
-			prefix = "> "
+			prefix = colors.accent("> ")
 		}
 		lines = append(lines, truncate(prefix+body[index], width))
 	}
 	lines = append(lines, "")
 	for _, hint := range hints {
-		lines = append(lines, truncate(hint, width))
+		lines = append(lines, truncate(colors.muted(hint), width))
 	}
 	lines = append(lines, truncate(notice, width))
 	// В очень низком окне кадр обрезается: прокрутка терминала сдвинула бы
@@ -130,16 +129,4 @@ func renderMenu(vms []VM, cursor, width, height int, root, notice string, now ti
 		lines = lines[:height]
 	}
 	return strings.Join(lines, "\r\n")
-}
-
-// truncate обрезает строку по числу символов, а не байтов.
-func truncate(line string, width int) string {
-	if utf8.RuneCountInString(line) <= width {
-		return line
-	}
-	runes := []rune(line)
-	if width <= 1 {
-		return string(runes[:width])
-	}
-	return string(runes[:width-1]) + "…"
 }

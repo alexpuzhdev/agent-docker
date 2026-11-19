@@ -4,7 +4,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 // listHeaders — заголовки таблицы agd ls.
@@ -15,22 +14,22 @@ var listHeaders = []string{"VM", "СОСТОЯНИЕ", "CPU/RAM/ДИСК", "ПР
 func statusText(vm VM) string {
 	switch {
 	case vm.Running():
-		return "работает"
+		return colors.good("работает")
 	case vm.GuestStatus != "":
 		return "остановлена"
 	case !vm.StatusKnown:
-		return "неизвестно"
+		return colors.muted("неизвестно")
 	case !vm.Configured():
-		return "не настроена"
+		return colors.muted("не настроена")
 	default:
-		return "не запускалась"
+		return colors.muted("не запускалась")
 	}
 }
 
 // resourcesText печатает бюджет гостя как cpu/ram/диск.
 func resourcesText(vm VM) string {
 	if vm.Resources == nil {
-		return "—"
+		return colors.muted("—")
 	}
 	return strconv.Itoa(vm.Resources.VCPU) + "/" +
 		strconv.Itoa(vm.Resources.RAMMB) + "/" +
@@ -41,10 +40,10 @@ func resourcesText(vm VM) string {
 // печатается: readGit его не разбирает.
 func gitText(vm VM) string {
 	if vm.GitBroken {
-		return "повреждена"
+		return colors.bad("повреждена")
 	}
 	if vm.Git == nil {
-		return "—"
+		return colors.muted("—")
 	}
 	summary := vm.Git.Provider + " " + vm.Git.Repository
 	if vm.Git.Write && vm.Git.Branch != "" {
@@ -59,7 +58,8 @@ func vmRow(vm VM, now time.Time) []string {
 	if vm.Proxy {
 		proxy = "есть"
 	}
-	return []string{vm.Name, statusText(vm), resourcesText(vm), proxy, gitText(vm), sessionText(vm, now)}
+	return []string{colors.accent(vm.Name), statusText(vm), resourcesText(vm), proxy,
+		gitText(vm), sessionText(vm, now)}
 }
 
 // renderList строит таблицу гостей. Пустой список печатает подсказку.
@@ -80,17 +80,18 @@ func renderList(vms []VM) string {
 func renderTable(headers []string, rows [][]string) string {
 	widths := make([]int, len(headers))
 	for index, header := range headers {
-		widths[index] = utf8.RuneCountInString(header)
+		widths[index] = visibleWidth(header)
 	}
 	for _, row := range rows {
 		for index, cell := range row {
-			if index < len(widths) && utf8.RuneCountInString(cell) > widths[index] {
-				widths[index] = utf8.RuneCountInString(cell)
+			if index < len(widths) && visibleWidth(cell) > widths[index] {
+				widths[index] = visibleWidth(cell)
 			}
 		}
 	}
-	var builder strings.Builder
-	writeRow(&builder, headers, widths)
+	var header, builder strings.Builder
+	writeRow(&header, headers, widths)
+	builder.WriteString(colors.muted(strings.TrimSuffix(header.String(), "\n")) + "\n")
 	for _, row := range rows {
 		writeRow(&builder, row, widths)
 	}
@@ -105,7 +106,7 @@ func writeRow(builder *strings.Builder, cells []string, widths []int) {
 		if index == len(cells)-1 {
 			break
 		}
-		padding := widths[index] - utf8.RuneCountInString(cell) + 2
+		padding := widths[index] - visibleWidth(cell) + 2
 		builder.WriteString(strings.Repeat(" ", padding))
 	}
 	builder.WriteString("\n")
@@ -152,7 +153,8 @@ func renderPanel(vms []VM, root string, width int, now time.Time) string {
 	if width < 20 {
 		width = 20
 	}
-	lines := []string{truncate("agent-docker "+version, width), truncate(root, width), ""}
+	lines := []string{truncate(colors.accent("agent-docker "+version), width),
+		truncate(colors.muted(root), width), ""}
 	if len(vms) == 0 {
 		lines = append(lines, truncate("  гостей нет, создайте первого: /new vm-01", width))
 	} else {
@@ -166,7 +168,7 @@ func renderPanel(vms []VM, root string, width int, now time.Time) string {
 	}
 	lines = append(lines, "")
 	for _, hint := range panelHints {
-		lines = append(lines, truncate(hint, width))
+		lines = append(lines, truncate(colors.muted(hint), width))
 	}
 	return strings.Join(lines, "\r\n") + "\r\n"
 }

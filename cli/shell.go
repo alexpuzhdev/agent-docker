@@ -29,7 +29,7 @@ func runShell(root string, console streams) int {
 	state := line{}
 	for {
 		_, width := terminalSize()
-		fmt.Fprint(console.output, renderLine(shellPrompt, state, width))
+		fmt.Fprint(console.output, renderLine(colors.accent(shellPrompt), state, width))
 		data, err := readBytes()
 		if err != nil {
 			fmt.Fprint(console.output, "\r\n")
@@ -47,7 +47,7 @@ func runShell(root string, console streams) int {
 			completed, candidates := completions(state.text(), vms)
 			state = state.replace(completed)
 			if len(candidates) > 1 {
-				fmt.Fprint(console.output, "\r\n"+strings.Join(candidates, "   ")+"\r\n")
+				fmt.Fprint(console.output, "\r\n"+colors.muted(strings.Join(candidates, "   "))+"\r\n")
 			}
 		case eventSubmit:
 			text := state.text()
