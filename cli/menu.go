@@ -1,0 +1,223 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
+)
+
+// terminal переключает режим ввода через stty: меню читает отдельные
+// клавиши, а запущенные из него команды получают обычный терминал.
+type terminal struct {
+	saved string
+}
+
+// openTerminal запоминает режим терминала и включает неформатированный ввод.
+func openTerminal() (*terminal, error) {
+	saved, err := stty("-g")
+	if err != nil {
+		return nil, fmt.Errorf("не удалось прочитать режим терминала: %w", err)
+	}
+	console := &terminal{saved: saved}
+	if err := console.raw(); err != nil {
+		return nil, err
+	}
+	return console, nil
+}
+
+func (console *terminal) raw() error {
+	if _, err := stty("raw", "-echo"); err != nil {
+		return fmt.Errorf("не удалось переключить терминал: %w", err)
+	}
+	return nil
+}
+
+func (console *terminal) cooked() {
+	if console.saved != "" {
+		stty(strings.Fields(console.saved)...)
+	}
+}
+
+// stty выполняет команду над текущим терминалом.
+func stty(args ...string) (string, error) {
+	command := exec.Command("stty", args...)
+	command.Stdin = os.Stdin
+	output, err := command.Output()
+	return strings.TrimSpace(string(output)), err
+}
+
+// terminalSize возвращает размер окна, подставляя обычные 24x80 при отказе.
+func terminalSize() (int, int) {
+	output, err := stty("size")
+	if err == nil {
+		fields := strings.Fields(output)
+		if len(fields) == 2 {
+			height, heightErr := strconv.Atoi(fields[0])
+			width, widthErr := strconv.Atoi(fields[1])
+			if heightErr == nil && widthErr == nil && height > 4 && width > 20 {
+				return height, width
+			}
+		}
+	}
+	return 24, 80
+}
+
+// interactive сообщает, подключён ли к вводу терминал.
+func interactive() bool {
+	info, err := os.Stdin.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+// readKey читает одну клавишу, разбирая последовательности стрелок.
+func readKey() (byte, error) {
+	buffer := make([]byte, 8)
+	count, err := os.Stdin.Read(buffer)
+	if err != nil {
+		return 0, err
+	}
+	if count == 0 {
+		return 0, io.EOF
+	}
+	if count >= 3 && buffer[0] == 27 && buffer[1] == '[' {
+		return buffer[2], nil
+	}
+	return buffer[0], nil
+}
+
+// runMenu показывает список окружений и выполняет над ними действия.
+// Без терминала меню открыть нельзя, поэтому печатается справка.
+func runMenu(root string, console streams) int {
+	if !interactive() {
+		fmt.Fprint(console.output, helpText)
+		return 0
+	}
+	screen, err := openTerminal()
+	if err != nil {
+		fmt.Fprintln(console.errors, err)
+		return 1
+	}
+	defer screen.cooked()
+	// Пока открыто меню, сообщения о недоступном docker не портят кадр:
+	// их место занимает строка состояния под списком.
+	quiet := streams{input: console.input, output: console.output, errors: io.Discard}
+	cursor := 0
+	notice := ""
+	for {
+		vms, err := inventory(root, quiet)
+		if err != nil {
+			notice = err.Error()
+			vms = nil
+		}
+		cursor = moveCursor(cursor, 0, len(vms))
+		height, width := terminalSize()
+		fmt.Fprint(console.output, "\x1b[2J\x1b[H"+renderMenu(vms, cursor, width, height, root, notice))
+		key, err := readKey()
+		if err != nil {
+			return 0
+		}
+		notice = ""
+		switch navigation(key) {
+		case actionQuit:
+			fmt.Fprint(console.output, "\x1b[2J\x1b[H")
+			return 0
+		case actionUp:
+			cursor = moveCursor(cursor, -1, len(vms))
+			continue
+		case actionDown:
+			cursor = moveCursor(cursor, 1, len(vms))
+			continue
+		case actionRefresh:
+			continue
+		case actionCreate:
+			notice = outside(screen, console, func() { createVM(root, console) })
+			continue
+		}
+		target, known := keyActions[key]
+		if key == 13 {
+			target, known = "vm-console", true
+		}
+		if !known {
+			continue
+		}
+		if len(vms) == 0 {
+			notice = "сначала создайте гостя клавишей n"
+			continue
+		}
+		selected := vms[cursor]
+		notice = outside(screen, console, func() { menuTarget(root, target, selected, console) })
+	}
+}
+
+// outside выполняет действие в обычном режиме терминала и возвращает меню
+// в неформатированный режим. Ошибка переключения становится сообщением.
+func outside(screen *terminal, console streams, body func()) string {
+	screen.cooked()
+	fmt.Fprint(console.output, "\x1b[2J\x1b[H")
+	body()
+	fmt.Fprint(console.output, "\nНажмите Enter, чтобы вернуться в меню. ")
+	bufio.NewReader(console.input).ReadString('\n')
+	if err := screen.raw(); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// menuTarget запускает выбранное действие над гостем.
+func menuTarget(root, target string, vm VM, console streams) {
+	environment := map[string]string{"VM": vm.Name}
+	switch target {
+	case "vm-logs":
+		environment["LOG_TAIL"] = "50"
+		environment["LOG_SERVICE"] = ""
+	case "vm-remove":
+		// Диск гостя из меню не удаляется: для этого есть agd rm --delete-disk.
+		environment["DISK_KEEP"] = "1"
+		prompt := "Будут удалены контейнеры и настройки " + vm.Name + ". Диск гостя сохранится в томе Docker."
+		if !confirmed(prompt, vm.Name, console) {
+			fmt.Fprintln(console.output, "Отменено.")
+			return
+		}
+	}
+	if err := runManage(root, target, environment); err != nil {
+		fmt.Fprintln(console.errors, err)
+	}
+}
+
+// createVM спрашивает имя и бюджет нового гостя и запускает подготовку.
+func createVM(root string, console streams) {
+	reader := bufio.NewReader(console.input)
+	fmt.Fprint(console.output, "Имя новой VM (например vm-03): ")
+	name, err := reader.ReadString('\n')
+	if err != nil && strings.TrimSpace(name) == "" {
+		return
+	}
+	name = strings.TrimSpace(name)
+	if !validName(name) {
+		fmt.Fprintln(console.errors, "Имя VM задаётся как vm-01, номера от 01 до 254.")
+		return
+	}
+	environment := map[string]string{"VM": name}
+	for _, field := range []struct{ prompt, key string }{
+		{"CPU", "VCPU"}, {"RAM, МиБ", "RAM_MB"}, {"Диск, ГиБ", "DISK_GB"},
+	} {
+		fmt.Fprintf(console.output, "%s (Enter — значение из .env): ", field.prompt)
+		answer, _ := reader.ReadString('\n')
+		answer = strings.TrimSpace(answer)
+		if answer == "" {
+			continue
+		}
+		value, err := strconv.Atoi(answer)
+		if err != nil || value <= 0 {
+			fmt.Fprintln(console.errors, "Ожидалось положительное число.")
+			return
+		}
+		environment[field.key] = answer
+	}
+	if err := runManage(root, "vm-setup", environment); err != nil {
+		fmt.Fprintln(console.errors, err)
+	}
+}

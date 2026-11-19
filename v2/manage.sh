@@ -330,6 +330,36 @@ setup() {
     start_guest
     wait_ready
 }
+show_logs() {
+    local tail=${LOG_TAIL:-50} service=${LOG_SERVICE:-}
+    local -a arguments=(logs --no-color)
+    [[ $tail = all || $tail =~ ^(0|[1-9][0-9]{0,5})$ ]] || fail 'LOG_TAIL принимает число или all.'
+    arguments+=(--tail "$tail")
+    case $service in
+        '') ;;
+        vm|proxy) ;;
+        *) fail 'LOG_SERVICE принимает vm или proxy.' ;;
+    esac
+    if [[ ${LOG_FOLLOW:-0} = 1 ]]; then arguments+=(--follow); fi
+    if test -n "$service"; then arguments+=("$service"); fi
+    compose "${arguments[@]}"
+}
+show_profile() {
+    vm_running || fail "$VM_NAME не запущена. Профиль читается из работающего гостя: make vm-up VM=$VM_NAME"
+    compose exec -T vm cat /guest/profile.json
+}
+remove_guest() {
+    test "$VM_STATE" = "$state_root/$VM_NAME" || fail 'Каталог состояния VM не распознан.'
+    stop_guest
+    if [[ ${DISK_KEEP:-1} = 0 ]]; then
+        compose down --volumes --remove-orphans
+        rm -rf -- "$VM_STATE"
+        printf '%s удалена вместе с диском и настройками.\n' "$VM_NAME"
+    else
+        compose down --remove-orphans
+        printf '%s удалена. Диск сохранён в томе Docker, настройки остались в %s.\n' "$VM_NAME" "$VM_STATE"
+    fi
+}
 configured() {
     test -f "$VM_STATE/resources" && test -f "$VM_STATE/upstream" ||
         fail "Сначала выполните make vm-setup VM=$VM_NAME."
@@ -384,6 +414,24 @@ case "$target" in
         configured
         stop_guest
         compose stop proxy
+        ;;
+    vm-logs)
+        configured
+        show_logs
+        ;;
+    vm-profile)
+        configured
+        show_profile
+        ;;
+    vm-remove)
+        if test -f "$VM_STATE/resources"; then
+            load_config
+        else
+            # Гость без сохранённого бюджета удаляется вместе с незавершённой
+            # настройкой: Compose нужны значения переменных, но не сам гость.
+            export VM_CONFIG_VCPU=1 VM_CONFIG_RAM=512 VM_CONFIG_DISK=4
+        fi
+        remove_guest
         ;;
     vm-console|claude|claude-auth|claude-logout)
         configured
