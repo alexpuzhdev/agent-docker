@@ -58,14 +58,23 @@ func (vm VM) Running() bool {
 	return strings.HasPrefix(vm.GuestStatus, "Up")
 }
 
-// validName проверяет имя VM так же, как set_name в manage.sh.
-func validName(name string) bool {
+// vmNumber возвращает номер гостя из имени или ноль, если имя не подходит.
+func vmNumber(name string) int {
 	match := namePattern.FindStringSubmatch(name)
 	if match == nil {
-		return false
+		return 0
 	}
 	number, err := strconv.Atoi(match[1])
-	return err == nil && number >= 1 && number <= 254
+	if err != nil {
+		return 0
+	}
+	return number
+}
+
+// validName проверяет имя VM так же, как set_name в manage.sh.
+func validName(name string) bool {
+	number := vmNumber(name)
+	return number >= 1 && number <= 254
 }
 
 // loadVMs читает каталоги состояния и возвращает гостей по возрастанию имени.
@@ -84,7 +93,9 @@ func loadVMs(state string) ([]VM, error) {
 		}
 		vms = append(vms, loadVM(filepath.Join(state, entry.Name()), entry.Name()))
 	}
-	sort.Slice(vms, func(first, second int) bool { return vms[first].Name < vms[second].Name })
+	sort.Slice(vms, func(first, second int) bool {
+		return vmNumber(vms[first].Name) < vmNumber(vms[second].Name)
+	})
 	return vms, nil
 }
 

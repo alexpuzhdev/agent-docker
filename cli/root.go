@@ -74,11 +74,17 @@ func containsMarker(directory string) bool {
 }
 
 // stateRoot возвращает каталог состояния VM с учётом V2_STATE_DIR.
+// Относительное значение считается от корня проекта: manage.sh переходит
+// туда до вычисления пути, и CLI должен выбирать тот же каталог.
 func stateRoot(root string) string {
-	if value := os.Getenv("V2_STATE_DIR"); value != "" {
+	value := os.Getenv("V2_STATE_DIR")
+	if value == "" {
+		return filepath.Join(root, defaultStateDir)
+	}
+	if filepath.IsAbs(value) {
 		return value
 	}
-	return filepath.Join(root, defaultStateDir)
+	return filepath.Join(root, value)
 }
 
 // projectPrefix возвращает префикс проектов Compose с учётом V2_PROJECT_PREFIX.

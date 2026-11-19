@@ -73,6 +73,11 @@ func TestStateRootAndPrefix(t *testing.T) {
 	if got := stateRoot("/opt/agent-docker"); got != "/var/lib/agent-docker" {
 		t.Fatalf("получено %q", got)
 	}
+	// Относительное значение manage.sh считает от корня проекта.
+	t.Setenv("V2_STATE_DIR", "state")
+	if got := stateRoot("/opt/agent-docker"); got != filepath.Join("/opt/agent-docker", "state") {
+		t.Fatalf("получено %q", got)
+	}
 	t.Setenv("V2_PROJECT_PREFIX", "")
 	if got := projectPrefix(); got != defaultProjectPrefix {
 		t.Fatalf("получено %q", got)

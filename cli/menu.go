@@ -65,10 +65,16 @@ func terminalSize() (int, int) {
 	return 24, 80
 }
 
-// interactive сообщает, подключён ли к вводу терминал.
+// interactive сообщает, подключён ли к вводу терминал. Признака символьного
+// устройства мало: /dev/null тоже символьное, поэтому режим запрашивается у
+// самого терминала, иначе agd </dev/null падал бы вместо показа справки.
 func interactive() bool {
 	info, err := os.Stdin.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
+	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	_, err = stty("-g")
+	return err == nil
 }
 
 // readKey читает одну клавишу, разбирая последовательности стрелок.

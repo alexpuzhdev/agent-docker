@@ -141,4 +141,24 @@ target vm-stop VM=vm-05 FAKE_RUNNING=container-id FAKE_STOP_FAIL=1
 check test "$status" -ne 0
 check lacks_call 'stop proxy'
 
+# Деструктивная цель требует явного имени: гость по умолчанию не подставляется.
+target vm-remove
+check test "$status" -ne 0
+check has 'Укажите гостя явно'
+check lacks_call 'down'
+
+# Удаление не зависит от сохранённого бюджета и от значений в окружении.
+mkdir -p "$work/state/vm-06"
+printf '2 4096 12\n' > "$work/state/vm-06/resources"
+printf 'http://proxy.invalid:3128\n' > "$work/state/vm-06/upstream"
+target vm-remove VM=vm-06 VCPU=8
+check test "$status" -eq 0
+check called 'down --remove-orphans'
+
+mkdir -p "$work/state/vm-07"
+printf 'повреждено\n' > "$work/state/vm-07/resources"
+target vm-remove VM=vm-07 DISK_KEEP=0
+check test "$status" -eq 0
+check test ! -e "$work/state/vm-07"
+
 echo 'test_vm_manage_targets.sh: все проверки пройдены.'

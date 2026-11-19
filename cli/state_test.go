@@ -85,6 +85,24 @@ func TestLoadVMsReadsState(t *testing.T) {
 	}
 }
 
+func TestLoadVMsSortsByNumber(t *testing.T) {
+	state := t.TempDir()
+	for _, name := range []string{"vm-100", "vm-99", "vm-02", "vm-254"} {
+		writeVM(t, state, name, "2 4096 12\n", "")
+	}
+	vms, err := loadVMs(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(vms))
+	for _, vm := range vms {
+		names = append(names, vm.Name)
+	}
+	if strings.Join(names, ",") != "vm-02,vm-99,vm-100,vm-254" {
+		t.Fatalf("порядок по номеру нарушен: %v", names)
+	}
+}
+
 func TestLoadVMsMissingStateDirectory(t *testing.T) {
 	vms, err := loadVMs(filepath.Join(t.TempDir(), "нет"))
 	if err != nil || vms != nil {

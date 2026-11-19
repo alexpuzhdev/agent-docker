@@ -353,6 +353,7 @@ show_profile() {
 remove_guest() {
     # Проверка до первого вызова compose: он создаёт каталоги состояния и
     # после него несуществующий гость выглядел бы настроенным.
+    test "$VM_STATE" = "$state_root/$VM_NAME" || fail 'Каталог состояния VM не распознан.'
     test -d "$VM_STATE" || fail "$VM_NAME не найдена: каталог состояния отсутствует."
     if ! (stop_guest); then
         printf 'Штатное выключение %s не завершилось, контейнеры останавливаются принудительно.\n' "$VM_NAME" >&2
@@ -430,13 +431,11 @@ case "$target" in
         show_profile
         ;;
     vm-remove)
-        if test -f "$VM_STATE/resources"; then
-            load_config
-        else
-            # Гость без сохранённого бюджета удаляется вместе с незавершённой
-            # настройкой: Compose нужны значения переменных, но не сам гость.
-            export VM_CONFIG_VCPU=1 VM_CONFIG_RAM=512 VM_CONFIG_DISK=4
-        fi
+        test -n "${VM:-}" || fail 'Укажите гостя явно: make vm-remove VM=vm-02.'
+        # Бюджет не проверяется: при удалении значения нужны только для
+        # подстановки в compose.yaml, а сохранённые ресурсы могут быть
+        # несовместимы с окружением или повреждены незавершённой настройкой.
+        export VM_CONFIG_VCPU=1 VM_CONFIG_RAM=512 VM_CONFIG_DISK=4
         remove_guest
         ;;
     vm-console|claude|claude-auth|claude-logout)
