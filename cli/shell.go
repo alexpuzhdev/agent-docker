@@ -25,6 +25,7 @@ func runShell(root string, console streams) int {
 	defer screen.cooked()
 	quiet := streams{input: console.input, output: console.output, errors: io.Discard}
 	vms, _ := inventory(root, quiet)
+	fmt.Fprint(console.output, "\x1b[2J\x1b[H")
 	showPanel(vms, root, console)
 	state := line{}
 	for {
@@ -44,6 +45,10 @@ func runShell(root string, console streams) int {
 		case eventInterrupt:
 			fmt.Fprint(console.output, "\r\n")
 		case eventComplete:
+			// Дополняется только конец строки: иначе Tab уводил бы курсор.
+			if state.cursor != len(state.runes) {
+				continue
+			}
 			completed, candidates := completions(state.text(), vms)
 			state = state.replace(completed)
 			if len(candidates) > 1 {
@@ -51,11 +56,12 @@ func runShell(root string, console streams) int {
 			}
 		case eventSubmit:
 			text := state.text()
-			state = state.remember(text)
 			fmt.Fprint(console.output, "\r\n")
 			if strings.TrimSpace(text) == "" {
+				state = state.reset()
 				continue
 			}
+			state = state.remember(text)
 			done, err := runShellCommand(screen, root, text, console)
 			if err != nil {
 				fmt.Fprintln(console.errors, err)
@@ -65,15 +71,36 @@ func runShell(root string, console streams) int {
 				return 0
 			}
 			vms, _ = inventory(root, quiet)
-			showPanel(vms, root, console)
+			if changesState(text) {
+				showPanel(vms, root, console)
+			}
 		}
 	}
 }
 
-// showPanel перерисовывает экран со списком гостей.
+// changing — команды, после которых состояние гостей могло измениться и
+// список стоит показать заново.
+var changing = map[string]bool{"go": true, "claude": true, "console": true, "up": true,
+	"stop": true, "new": true, "setup": true, "rm": true, "remove": true, "proxy": true,
+	"git": true, "auth": true, "logout": true, "ls": true, "list": true}
+
+// changesState решает, перерисовывать ли список после команды. Вывод читающих
+// команд остаётся на экране: панель его больше не затирает.
+func changesState(text string) bool {
+	arguments := shellArgs(text)
+	if len(arguments) == 0 {
+		return false
+	}
+	if arguments[0] == "git" && len(arguments) > 1 && arguments[1] == "status" {
+		return false
+	}
+	return changing[arguments[0]]
+}
+
+// showPanel печатает список гостей потоком, не очищая экран.
 func showPanel(vms []VM, root string, console streams) {
 	_, width := terminalSize()
-	fmt.Fprint(console.output, "\x1b[2J\x1b[H"+renderPanel(vms, root, width, time.Now()))
+	fmt.Fprint(console.output, renderPanel(vms, root, width, time.Now()))
 }
 
 // runShellCommand выполняет введённую команду в обычном режиме терминала,
@@ -84,11 +111,15 @@ func runShellCommand(screen *terminal, root, text string, console streams) (bool
 		return false, nil
 	}
 	if arguments[0] == "quit" {
-		fmt.Fprint(console.output, "\r\n")
 		return true, nil
 	}
+	if strings.HasPrefix(arguments[0], "-") {
+		fmt.Fprint(console.output, colors.muted("команды начинаются со слеша, например /ls\r\n"))
+		return false, nil
+	}
 	screen.cooked()
-	fmt.Fprint(console.output, "\x1b[2J\x1b[H")
-	execute(append([]string{"--root", root}, arguments...), console)
+	if code := execute(append([]string{"--root", root}, arguments...), console); code != 0 {
+		fmt.Fprintf(console.errors, "команда завершилась с кодом %d\n", code)
+	}
 	return false, screen.raw()
 }

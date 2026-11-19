@@ -155,6 +155,11 @@ func performManage(root string, act action, console streams) int {
 		fmt.Fprintln(console.output, "Отменено.")
 		return 1
 	}
-	noteSession(root, act.vm, act.target, act.environment["PROJECT"], console)
-	return exitCode(runManage(root, act.target, act.environment))
+	code := exitCode(runManage(root, act.target, act.environment))
+	if code == 0 {
+		// Сессию запоминаем только после удачного входа: отказ гостя не
+		// должен менять то, куда вернёт следующий agd go.
+		noteSession(root, act.vm, act.target, act.environment["PROJECT"], console)
+	}
+	return code
 }

@@ -45,6 +45,10 @@ func readSession(dir string) *Session {
 	if err := json.Unmarshal(content, &session); err != nil || session.Agent == "" {
 		return nil
 	}
+	// Имя проекта задаёт пользователь: управляющие символы из него не должны
+	// попадать в терминал и ломать разметку списка.
+	session.Agent = truncate(clean(session.Agent), projectLimit)
+	session.Project = clean(session.Project)
 	return &session
 }
 
@@ -55,12 +59,21 @@ func rememberSession(dir, target, project string) error {
 	if !known {
 		return nil
 	}
+	// Возврат через консоль не означает смену агента: в ней продолжает
+	// работать тот, кого запускали, поэтому прежняя запись сохраняется.
+	if previous := readSession(dir); previous != nil && target == "vm-console" {
+		agent = previous.Agent
+		if project == "" {
+			project = previous.Project
+		}
+	}
 	// Каталог не создаётся: запись о сессии не должна порождать гостя,
 	// которого никто не настраивал.
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return nil
 	}
-	content, err := json.Marshal(Session{Agent: agent, Project: project, Opened: time.Now().UTC()})
+	content, err := json.Marshal(Session{Agent: clean(agent), Project: clean(project),
+		Opened: time.Now().UTC()})
 	if err != nil {
 		return err
 	}
@@ -128,7 +141,9 @@ func humanAge(opened, now time.Time) string {
 // подключаются через консоль: запуск второго агента гость отклонит, потому
 // что его оболочка занята. Новый агент запускается, только если сессий не было.
 func lastSession(vm VM) string {
-	if vm.Session == nil {
+	// Остановленный гость поднимается заново и агента в нём нет, сколько бы
+	// сессий ни открывали раньше.
+	if vm.Session == nil || !vm.Running() {
 		return "claude"
 	}
 	return "vm-console"

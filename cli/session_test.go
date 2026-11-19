@@ -99,3 +99,54 @@ func TestSessionText(t *testing.T) {
 		t.Fatalf("длинный проект должен обрезаться: %q", got)
 	}
 }
+
+func TestResumeKeepsAgentAndProject(t *testing.T) {
+	state := t.TempDir()
+	writeVM(t, state, "vm-01", "2 4096 12\n", "")
+	dir := filepath.Join(state, "vm-01")
+	if err := rememberSession(dir, "claude", "my-api"); err != nil {
+		t.Fatal(err)
+	}
+	// Возврат через консоль не меняет агента: в ней продолжает работать он же.
+	if err := rememberSession(dir, "vm-console", ""); err != nil {
+		t.Fatal(err)
+	}
+	session := readSession(dir)
+	if session == nil || session.Agent != "claude" || session.Project != "my-api" {
+		t.Fatalf("после возврата сессия стала %+v", session)
+	}
+}
+
+func TestLastSessionNeedsRunningGuest(t *testing.T) {
+	stopped := VM{Name: "vm-01", StatusKnown: true, Session: &Session{Agent: "claude"}}
+	if target := lastSession(stopped); target != "claude" {
+		t.Fatalf("в остановленного гостя возвращаются запуском агента, получено %q", target)
+	}
+	running := VM{Name: "vm-01", StatusKnown: true, GuestStatus: "Up 2 hours",
+		Session: &Session{Agent: "claude"}}
+	if target := lastSession(running); target != "vm-console" {
+		t.Fatalf("к работающему агенту подключаются через консоль, получено %q", target)
+	}
+}
+
+func TestSessionTextDropsControlCharacters(t *testing.T) {
+	state := t.TempDir()
+	writeVM(t, state, "vm-01", "2 4096 12\n", "")
+	dir := filepath.Join(state, "vm-01")
+	if err := rememberSession(dir, "claude", "api\x1b[2Jx\nY"); err != nil {
+		t.Fatal(err)
+	}
+	session := readSession(dir)
+	if session == nil {
+		t.Fatal("сессия не прочиталась")
+	}
+	for _, symbol := range session.Project {
+		if control(symbol) {
+			t.Fatalf("управляющий символ остался в проекте: %q", session.Project)
+		}
+	}
+	vm := VM{Session: session}
+	if strings.ContainsRune(sessionText(vm, time.Now()), 27) {
+		t.Fatalf("строка списка содержит escape: %q", sessionText(vm, time.Now()))
+	}
+}

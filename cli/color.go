@@ -84,6 +84,26 @@ func (colors palette) muted(text string) string  { return colors.paint(toneMuted
 func (colors palette) good(text string) string   { return colors.paint(toneGood, text) }
 func (colors palette) bad(text string) string    { return colors.paint(toneBad, text) }
 
+// clean убирает управляющие символы из строк, пришедших извне: имя проекта,
+// статус docker и имя репозитория попадают на экран, и escape-последовательность
+// оттуда выполнилась бы терминалом, а перевод строки сломал бы разметку.
+func clean(text string) string {
+	if strings.IndexFunc(text, control) < 0 {
+		return text
+	}
+	return strings.Map(func(symbol rune) rune {
+		if control(symbol) {
+			return -1
+		}
+		return symbol
+	}, text)
+}
+
+// control опознаёт управляющий символ, включая запись вне диапазона печати.
+func control(symbol rune) bool {
+	return symbol < 0x20 || symbol == 0x7f || (symbol >= 0x80 && symbol <= 0x9f) || symbol == 0xfeff
+}
+
 // visibleWidth считает ширину строки в символах, пропуская управляющие
 // последовательности: от них на экране ничего не видно.
 func visibleWidth(text string) int {

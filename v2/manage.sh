@@ -364,6 +364,8 @@ remove_guest() {
         printf '%s удалена вместе с диском и настройками.\n' "$VM_NAME"
     else
         compose down --remove-orphans
+        # Запись об открытой сессии описывает гостя, которого больше нет.
+        rm -f -- "$VM_STATE/session"
         printf '%s удалена. Диск сохранён в томе Docker, настройки остались в %s.\n' "$VM_NAME" "$VM_STATE"
     fi
 }

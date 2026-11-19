@@ -49,9 +49,10 @@ with (workspace / 'console.lock').open('a') as lock, socket.socket(socket.AF_UNI
     saved = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        if operation == 'vm-console':
+        if operation == 'vm-console' and serial_log.exists():
             # Возврат к работающей сессии: хвост журнала показывает, что
-            # происходило в госте, пока консоль была отключена.
+            # происходило в госте, пока консоль была отключена. Журнала может
+            # не быть у гостя, который ещё ни разу не загружался.
             with serial_log.open('rb') as log:
                 end = log.seek(0, os.SEEK_END)
                 log.seek(max(0, end - 4096))

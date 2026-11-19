@@ -34,7 +34,7 @@ func statuses(prefix string) (map[string]map[string]string, error) {
 		// docker ps перечисляет контейнеры от новых к старым: первая запись
 		// сервиса самая свежая, более старые перезапуски не затирают её.
 		if _, seen := found[name][fields[1]]; !seen {
-			found[name][fields[1]] = fields[2]
+			found[name][fields[1]] = clean(fields[2])
 		}
 	}
 	return found, nil

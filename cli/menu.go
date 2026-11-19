@@ -80,7 +80,7 @@ func interactive() bool {
 
 // readBytes читает очередную порцию ввода терминала.
 func readBytes() ([]byte, error) {
-	buffer := make([]byte, 32)
+	buffer := make([]byte, 4096)
 	count, err := os.Stdin.Read(buffer)
 	if err != nil {
 		return nil, err
@@ -207,10 +207,11 @@ func menuTarget(root, target string, vm VM, project string, console streams) {
 			return
 		}
 	}
-	noteSession(root, vm.Name, target, project, console)
 	if err := runManage(root, target, environment); err != nil {
 		fmt.Fprintln(console.errors, err)
+		return
 	}
+	noteSession(root, vm.Name, target, project, console)
 }
 
 // createVM спрашивает имя и бюджет нового гостя и запускает подготовку.

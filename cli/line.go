@@ -3,7 +3,6 @@ package main
 import (
 	"strconv"
 	"strings"
-	"unicode/utf8"
 )
 
 // lineEvent — что редактор просит сделать после обработки клавиши.
@@ -100,7 +99,18 @@ func (state line) apply(data []byte) (line, lineEvent) {
 	if data[0] < 32 {
 		return state, eventNone
 	}
-	return state.insert(string(data)), eventNone
+	// Вставка из буфера обмена может содержать перевод строки: текст до него
+	// попадает в строку, а сама вставка выполняется как ввод с Enter.
+	input := string(data)
+	if index := strings.IndexAny(input, "\r\n"); index >= 0 {
+		return state.insert(printable(input[:index])), eventSubmit
+	}
+	return state.insert(printable(input)), eventNone
+}
+
+// printable оставляет от ввода только то, что можно показать в строке.
+func printable(text string) string {
+	return clean(strings.ToValidUTF8(text, ""))
 }
 
 // escape разбирает последовательности стрелок и клавиш перехода.
@@ -204,12 +214,23 @@ func (state line) recallStep(step int) line {
 	return state
 }
 
-// renderLine перерисовывает строку ввода целиком и ставит курсор на место.
+// renderLine перерисовывает строку ввода и ставит курсор на место. Если
+// строка не помещается в окно, показывается её часть вокруг курсора.
 func renderLine(prompt string, state line, width int) string {
-	visible := truncate(prompt+state.text(), width)
-	frame := "\r\x1b[K" + visible
-	tail := utf8.RuneCountInString(visible) - utf8.RuneCountInString(prompt) - state.cursor
-	if tail > 0 {
+	space := width - visibleWidth(prompt)
+	if space < 1 {
+		space = 1
+	}
+	start := 0
+	if state.cursor >= space {
+		start = state.cursor - space + 1
+	}
+	end := start + space
+	if end > len(state.runes) {
+		end = len(state.runes)
+	}
+	frame := "\r\x1b[K" + prompt + string(state.runes[start:end])
+	if tail := end - state.cursor; tail > 0 {
 		frame += "\x1b[" + strconv.Itoa(tail) + "D"
 	}
 	return frame

@@ -166,17 +166,17 @@ func readGit(path string) (*Git, error) {
 		return nil, errors.New("настройка Git повреждена")
 	}
 	assignment := &Git{
-		Provider:   stored.Provider,
-		Origin:     stored.Origin,
-		Repository: stored.Repository,
+		Provider:   clean(stored.Provider),
+		Origin:     clean(stored.Origin),
+		Repository: clean(stored.Repository),
 		Write:      stored.Write,
-		Branch:     stored.WriteBranch,
+		Branch:     clean(stored.WriteBranch),
 	}
 	if assignment.Provider == "" {
 		assignment.Provider = "github"
 	}
 	if assignment.Provider == "gitlab" {
-		assignment.Repository = stored.Project
+		assignment.Repository = clean(stored.Project)
 	}
 	if assignment.Repository == "" {
 		return nil, errors.New("настройка Git повреждена")

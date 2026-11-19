@@ -149,3 +149,55 @@ func TestRenderLinePlacesCursor(t *testing.T) {
 		t.Fatalf("курсор в конце строки не требует сдвига: %q", full)
 	}
 }
+
+func TestRenderLineScrollsAndCountsVisibleWidth(t *testing.T) {
+	withColors(t)
+	prompt := colors.accent("> ")
+	state := typeText(line{}, strings.Repeat("a", 40))
+	frame := renderLine(prompt, state, 20)
+	visible := strings.TrimPrefix(stripEscapes(frame), "\r")
+	if len([]rune(visible)) > 20 {
+		t.Fatalf("кадр шире окна: %q", visible)
+	}
+	if !strings.HasPrefix(visible, "> ") {
+		t.Fatalf("приглашение потерялось: %q", visible)
+	}
+	// Курсор в конце строки: сдвигать его влево не нужно.
+	if strings.Contains(frame, "D") {
+		t.Fatalf("лишний сдвиг курсора: %q", frame)
+	}
+	// Курсор в начале: видна голова строки, сдвиг равен её длине.
+	state, _ = state.apply([]byte{1})
+	frame = renderLine(prompt, state, 20)
+	if !strings.HasSuffix(frame, "\x1b[18D") {
+		t.Fatalf("сдвиг курсора к началу: %q", frame)
+	}
+	visible = strings.TrimPrefix(stripEscapes(frame), "\r")
+	if len([]rune(visible)) > 20 {
+		t.Fatalf("кадр шире окна: %q", visible)
+	}
+}
+
+func TestLinePasteWithNewlineSubmits(t *testing.T) {
+	state, event := line{}.apply([]byte("/ls\n"))
+	if event != eventSubmit {
+		t.Fatalf("вставка с переводом строки должна выполняться, получено %q", event)
+	}
+	if state.text() != "/ls" {
+		t.Fatalf("в строке осталось %q", state.text())
+	}
+	state, event = line{}.apply([]byte("vm-01"))
+	if event != eventNone || state.text() != "vm-01" {
+		t.Fatalf("обычная вставка дала %q и %q", event, state.text())
+	}
+}
+
+func TestLineDropsControlCharacters(t *testing.T) {
+	state, _ := line{}.apply([]byte("vm\x1b[31m-01"))
+	if strings.ContainsRune(state.text(), 27) {
+		t.Fatalf("управляющие символы не должны попадать в строку: %q", state.text())
+	}
+	if !strings.HasPrefix(state.text(), "vm") {
+		t.Fatalf("видимый текст должен сохраняться: %q", state.text())
+	}
+}

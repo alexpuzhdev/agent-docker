@@ -76,3 +76,20 @@ func TestSlashCommandsMatchSubcommands(t *testing.T) {
 		}
 	}
 }
+
+func TestChangesStateOnlyForCommandsThatChangeIt(t *testing.T) {
+	refreshes := []string{"/up vm-01", "/stop vm-01", "/go vm-01", "/claude vm-01",
+		"/rm vm-01", "/git vm-01 --repo owner/name", "/ls", "vm-01"}
+	for _, text := range refreshes {
+		if !changesState(text) {
+			t.Fatalf("после %q список нужно обновить", text)
+		}
+	}
+	keeps := []string{"/logs vm-01", "/status vm-01", "/profile vm-01", "/help",
+		"/git status vm-01", "", "/quit"}
+	for _, text := range keeps {
+		if changesState(text) {
+			t.Fatalf("после %q вывод не должен затираться списком", text)
+		}
+	}
+}
