@@ -4,9 +4,14 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+// decimal повторяет проверку LOG_TAIL в manage.sh, чтобы отказ приходил от
+// CLI с понятным сообщением, а не из глубины скрипта.
+var decimal = regexp.MustCompile(`^(0|[1-9][0-9]{0,5})$`)
 
 // Виды действий CLI. Всё, что меняет состояние гостя, выполняет manage.sh:
 // CLI не дублирует его проверки, а только собирает для него окружение.
@@ -37,13 +42,13 @@ func parseArgs(args []string) (action, error) {
 	rest := args[1:]
 	switch name {
 	case "help", "-h", "--help":
-		return action{kind: kindHelp}, nil
+		return bare(kindHelp, name, rest)
 	case "version", "--version":
-		return action{kind: kindVersion}, nil
+		return bare(kindVersion, name, rest)
 	case "menu":
-		return action{kind: kindMenu}, nil
+		return bare(kindMenu, name, rest)
 	case "ls", "list":
-		return action{kind: kindList}, nil
+		return bare(kindList, name, rest)
 	case "status":
 		vm, err := singleVM(name, rest)
 		return action{kind: kindStatus, vm: vm}, err
@@ -76,6 +81,15 @@ func parseArgs(args []string) (action, error) {
 	}
 }
 
+// bare собирает команду без аргументов и флагов, отклоняя лишнее: иначе
+// опечатка вроде agd ls vm-02 выглядела бы выполненной.
+func bare(kind, command string, rest []string) (action, error) {
+	if len(rest) > 0 {
+		return action{}, errors.New("команда " + command + " не принимает аргументы: " + strings.Join(rest, " "))
+	}
+	return action{kind: kind}, nil
+}
+
 // newFlags создаёт набор флагов, который сам ничего не печатает: сообщения
 // об ошибках CLI выдаёт на русском в одном месте.
 func newFlags(name string) *flag.FlagSet {
@@ -83,6 +97,25 @@ func newFlags(name string) *flag.FlagSet {
 	flags.SetOutput(io.Discard)
 	flags.Usage = func() {}
 	return flags
+}
+
+// parse разбирает аргументы, не требуя, чтобы флаги стояли до имени VM.
+// Стандартный разбор останавливается на первом позиционном аргументе,
+// поэтому он повторяется для остатка, пока флаги не закончатся.
+func parse(flags *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for len(args) > 0 {
+		if err := flags.Parse(args); err != nil {
+			return nil, flagError(err)
+		}
+		rest := flags.Args()
+		if len(rest) == 0 {
+			break
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
+	return positional, nil
 }
 
 // takeVM проверяет, что остался ровно один позиционный аргумент — имя VM.
@@ -102,10 +135,11 @@ func takeVM(command string, rest []string) (string, error) {
 // singleVM разбирает команду без флагов, у которой есть только имя VM.
 func singleVM(command string, rest []string) (string, error) {
 	flags := newFlags(command)
-	if err := flags.Parse(rest); err != nil {
-		return "", flagError(err)
+	positional, err := parse(flags, rest)
+	if err != nil {
+		return "", err
 	}
-	return takeVM(command, flags.Args())
+	return takeVM(command, positional)
 }
 
 // simple собирает цель manage.sh, которой нужно только имя VM.
@@ -137,10 +171,11 @@ func parseSetup(rest []string) (action, error) {
 	origin := flags.String("url", "", "")
 	branch := flags.String("write", "", "")
 	sni := flags.Bool("sni-log", false, "")
-	if err := flags.Parse(rest); err != nil {
-		return action{}, flagError(err)
+	positional, err := parse(flags, rest)
+	if err != nil {
+		return action{}, err
 	}
-	vm, err := takeVM("new", flags.Args())
+	vm, err := takeVM("new", positional)
 	if err != nil {
 		return action{}, err
 	}
@@ -164,12 +199,13 @@ func parseSetup(rest []string) (action, error) {
 func parseUp(rest []string) (action, error) {
 	flags := newFlags("up")
 	sni := flags.Bool("sni-log", false, "")
-	if err := flags.Parse(rest); err != nil {
-		return action{}, flagError(err)
+	arguments, err := parse(flags, rest)
+	if err != nil {
+		return action{}, err
 	}
 	environment := map[string]string{}
 	vm := ""
-	if arguments := flags.Args(); len(arguments) > 0 {
+	if len(arguments) > 0 {
 		parsed, err := takeVM("up", arguments)
 		if err != nil {
 			return action{}, err
@@ -186,10 +222,11 @@ func parseConsole(rest []string, target, command string) (action, error) {
 	flags := newFlags(command)
 	project := flags.String("project", "", "")
 	resume := flags.String("resume", "", "")
-	if err := flags.Parse(rest); err != nil {
-		return action{}, flagError(err)
+	positional, err := parse(flags, rest)
+	if err != nil {
+		return action{}, err
 	}
-	vm, err := takeVM(command, flags.Args())
+	vm, err := takeVM(command, positional)
 	if err != nil {
 		return action{}, err
 	}
@@ -221,10 +258,11 @@ func parseGit(rest []string) (action, error) {
 	provider := flags.String("provider", "", "")
 	origin := flags.String("url", "", "")
 	branch := flags.String("write", "", "")
-	if err := flags.Parse(rest); err != nil {
-		return action{}, flagError(err)
+	positional, err := parse(flags, rest)
+	if err != nil {
+		return action{}, err
 	}
-	vm, err := takeVM("git", flags.Args())
+	vm, err := takeVM("git", positional)
 	if err != nil {
 		return action{}, err
 	}
@@ -286,18 +324,16 @@ func parseLogs(rest []string) (action, error) {
 	tail := flags.String("tail", "50", "")
 	service := flags.String("service", "", "")
 	follow := flags.Bool("follow", false, "")
-	if err := flags.Parse(rest); err != nil {
-		return action{}, flagError(err)
-	}
-	vm, err := takeVM("logs", flags.Args())
+	positional, err := parse(flags, rest)
 	if err != nil {
 		return action{}, err
 	}
-	if *tail != "all" {
-		lines, err := strconv.Atoi(*tail)
-		if err != nil || lines < 0 || lines > 100000 {
-			return action{}, errors.New("--tail принимает число от 0 до 100000 или all")
-		}
+	vm, err := takeVM("logs", positional)
+	if err != nil {
+		return action{}, err
+	}
+	if *tail != "all" && !decimal.MatchString(*tail) {
+		return action{}, errors.New("--tail принимает число от 0 до 999999 или all")
 	}
 	if *service != "" && *service != "vm" && *service != "proxy" {
 		return action{}, errors.New("--service принимает vm или proxy")
@@ -316,10 +352,11 @@ func parseRemove(rest []string) (action, error) {
 	keep := flags.Bool("keep-disk", false, "")
 	drop := flags.Bool("delete-disk", false, "")
 	yes := flags.Bool("yes", false, "")
-	if err := flags.Parse(rest); err != nil {
-		return action{}, flagError(err)
+	positional, err := parse(flags, rest)
+	if err != nil {
+		return action{}, err
 	}
-	vm, err := takeVM("rm", flags.Args())
+	vm, err := takeVM("rm", positional)
 	if err != nil {
 		return action{}, err
 	}
@@ -327,13 +364,13 @@ func parseRemove(rest []string) (action, error) {
 		return action{}, errors.New("выберите либо --keep-disk, либо --delete-disk")
 	}
 	environment := map[string]string{"VM": vm, "DISK_KEEP": "1"}
-	confirm := ""
+	confirm := "Будут удалены контейнеры и настройки " + vm + ". Диск гостя сохранится в томе Docker."
 	if *drop {
 		environment["DISK_KEEP"] = "0"
 		confirm = "Будут удалены контейнеры, диск и настройки " + vm + ", включая проекты и авторизацию в гостевой системе."
-	} else if !*keep {
-		confirm = "Будут удалены контейнеры и настройки " + vm + ". Диск гостя сохранится в томе Docker."
 	}
+	// Подтверждение снимает только явный --yes: --keep-disk выбирает судьбу
+	// диска, но не отменяет вопрос о необратимом удалении.
 	if *yes {
 		confirm = ""
 	}

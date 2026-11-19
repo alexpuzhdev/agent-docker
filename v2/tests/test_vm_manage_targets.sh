@@ -18,7 +18,7 @@ printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
 case "$1 ${2:-}" in
     'info --format') exit 0 ;;
     'compose version') exit 0 ;;
-    'wait '*|'wait') exit 0 ;;
+    'wait '*|'wait') test -z "${FAKE_WAIT_FAIL:-}"; exit $? ;;
 esac
 all=$*
 rest=${all#*compose.yaml }
@@ -29,6 +29,7 @@ case ${1:-} in
         if [[ $* = *vm* ]]; then printf '%s' "${FAKE_RUNNING:-}"; fi
         ;;
     exec)
+        if [[ $* = *poweroff.py* && -n ${FAKE_STOP_FAIL:-} ]]; then exit 1; fi
         if [[ $* = *profile.json* ]]; then printf '{"schema_version":1,"vm_id":"vm-02"}\n'; fi
         ;;
 esac
@@ -112,5 +113,32 @@ target vm-remove VM=vm-04 FAKE_RUNNING=container-id
 check test "$status" -eq 0
 check called 'poweroff.py'
 check called 'down --remove-orphans'
+
+# Несуществующий гость не удаляется и не появляется в состоянии.
+target vm-remove VM=vm-77
+check test "$status" -ne 0
+check has 'vm-77 не найдена'
+check lacks_call 'down'
+check test ! -e "$work/state/vm-77"
+
+# Гость, не ответивший на штатное выключение, всё равно удаляется.
+mkdir -p "$work/state/vm-05"
+printf '2 4096 12\n' > "$work/state/vm-05/resources"
+printf 'http://proxy.invalid:3128\n' > "$work/state/vm-05/upstream"
+target vm-remove VM=vm-05 FAKE_RUNNING=container-id FAKE_STOP_FAIL=1
+check test "$status" -eq 0
+check has 'принудительно'
+check called 'down --remove-orphans'
+
+# То же, когда гость не завершился в отведённое время.
+target vm-remove VM=vm-05 FAKE_RUNNING=container-id FAKE_WAIT_FAIL=1
+check test "$status" -eq 0
+check has 'принудительно'
+check called 'down --remove-orphans'
+
+# Остановка отдельной командой по-прежнему сообщает об отказе выключения.
+target vm-stop VM=vm-05 FAKE_RUNNING=container-id FAKE_STOP_FAIL=1
+check test "$status" -ne 0
+check lacks_call 'stop proxy'
 
 echo 'test_vm_manage_targets.sh: все проверки пройдены.'

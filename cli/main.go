@@ -1,13 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strings"
 )
 
 func main() {
-	console := streams{input: os.Stdin, output: os.Stdout, errors: os.Stderr}
+	console := streams{input: bufio.NewReader(os.Stdin), output: os.Stdout, errors: os.Stderr}
 	os.Exit(execute(os.Args[1:], console))
 }
 
@@ -49,24 +50,30 @@ func execute(args []string, console streams) int {
 	}
 }
 
-// takeRoot снимает общий флаг --root, который допускается перед командой.
+// takeRoot снимает общий флаг --root, где бы он ни стоял: иначе команда с
+// флагом после имени VM молча работала бы с автоматически найденным корнем.
 func takeRoot(args []string) ([]string, string, error) {
-	if len(args) == 0 {
-		return args, "", nil
-	}
-	if value, found := strings.CutPrefix(args[0], "--root="); found {
-		if value == "" {
-			return nil, "", errFlagRoot
+	root := ""
+	var rest []string
+	for index := 0; index < len(args); index++ {
+		if value, found := strings.CutPrefix(args[index], "--root="); found {
+			if value == "" {
+				return nil, "", errFlagRoot
+			}
+			root = value
+			continue
 		}
-		return args[1:], value, nil
-	}
-	if args[0] == "--root" {
-		if len(args) < 2 || args[1] == "" {
-			return nil, "", errFlagRoot
+		if args[index] == "--root" {
+			if index+1 >= len(args) || args[index+1] == "" {
+				return nil, "", errFlagRoot
+			}
+			root = args[index+1]
+			index++
+			continue
 		}
-		return args[2:], args[1], nil
+		rest = append(rest, args[index])
 	}
-	return args, "", nil
+	return rest, root, nil
 }
 
 // inventory читает состояние гостей и дополняет его состоянием контейнеров.

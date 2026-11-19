@@ -123,6 +123,11 @@ func renderMenu(vms []VM, cursor, width, height int, root, notice string) string
 		lines = append(lines, truncate(hint, width))
 	}
 	lines = append(lines, truncate(notice, width))
+	// В очень низком окне кадр обрезается: прокрутка терминала сдвинула бы
+	// верх списка за край экрана.
+	if len(lines) > height {
+		lines = lines[:height]
+	}
 	return strings.Join(lines, "\r\n")
 }
 

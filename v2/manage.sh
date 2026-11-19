@@ -269,7 +269,9 @@ prepare_base() {
 vm_running() { test -n "$(compose ps -q vm)"; }
 stop_guest() {
     if vm_running; then
-        compose exec -T vm python3 /opt/agent-docker/poweroff.py
+        # Явный возврат вместо errexit: внутри условия errexit отключается,
+        # и отказ выключения иначе остался бы незамеченным.
+        compose exec -T vm python3 /opt/agent-docker/poweroff.py || return 1
         timeout 50 docker wait "$(compose ps -a -q vm)" >/dev/null ||
             fail 'Гость не завершил штатную остановку.'
     fi
@@ -349,8 +351,12 @@ show_profile() {
     compose exec -T vm cat /guest/profile.json
 }
 remove_guest() {
-    test "$VM_STATE" = "$state_root/$VM_NAME" || fail 'Каталог состояния VM не распознан.'
-    stop_guest
+    # Проверка до первого вызова compose: он создаёт каталоги состояния и
+    # после него несуществующий гость выглядел бы настроенным.
+    test -d "$VM_STATE" || fail "$VM_NAME не найдена: каталог состояния отсутствует."
+    if ! (stop_guest); then
+        printf 'Штатное выключение %s не завершилось, контейнеры останавливаются принудительно.\n' "$VM_NAME" >&2
+    fi
     if [[ ${DISK_KEEP:-1} = 0 ]]; then
         compose down --volumes --remove-orphans
         rm -rf -- "$VM_STATE"

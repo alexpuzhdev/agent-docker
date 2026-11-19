@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"os"
 	"path/filepath"
@@ -9,19 +10,12 @@ import (
 	"testing"
 )
 
-// managed — переменные, которые CLI передаёт в manage.sh. Тест зануляет их
-// перед запуском, чтобы окружение разработчика не влияло на результат.
-var managed = []string{"VM", "VCPU", "RAM_MB", "DISK_GB", "REPO", "GIT_PROVIDER", "GIT_URL",
-	"GIT_WRITE", "GIT_WRITE_BRANCH", "PROJECT", "RESUME", "LOG_TAIL", "LOG_SERVICE",
-	"LOG_FOLLOW", "DISK_KEEP", "GATEWAY_SNI_LOG"}
-
 // fakeProject создаёт каталог проекта с подставным manage.sh, который
-// записывает цель и переданные переменные вместо работы с Docker.
+// записывает цель и переданные переменные вместо работы с Docker. Список
+// переменных берётся из самого CLI, поэтому новая переменная без теста
+// не останется незамеченной.
 func fakeProject(t *testing.T, code int) (string, string) {
 	t.Helper()
-	for _, name := range managed {
-		t.Setenv(name, "")
-	}
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "v2"), 0o700); err != nil {
 		t.Fatal(err)
@@ -42,7 +36,8 @@ func fakeProject(t *testing.T, code int) (string, string) {
 func quietStreams(input string) (streams, *bytes.Buffer, *bytes.Buffer) {
 	output := &bytes.Buffer{}
 	errorsOutput := &bytes.Buffer{}
-	return streams{input: strings.NewReader(input), output: output, errors: errorsOutput}, output, errorsOutput
+	console := streams{input: bufio.NewReader(strings.NewReader(input)), output: output, errors: errorsOutput}
+	return console, output, errorsOutput
 }
 
 func TestExecutePassesEnvironmentToManage(t *testing.T) {
@@ -148,5 +143,43 @@ func TestExecuteHelpAndVersion(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), version) {
 		t.Fatalf("версия: %s", output)
+	}
+}
+
+func TestExecuteIgnoresInheritedVariables(t *testing.T) {
+	root, log := fakeProject(t, 0)
+	// Экспортированные переменные не должны менять поведение команды:
+	// agd up без имени запускает всех настроенных гостей.
+	t.Setenv("VM", "vm-99")
+	t.Setenv("VCPU", "64")
+	t.Setenv("PROJECT", "чужой")
+	console, _, errorsOutput := quietStreams("")
+	if code := execute([]string{"--root", root, "up"}, console); code != 0 {
+		t.Fatalf("код %d, ошибки: %s", code, errorsOutput)
+	}
+	recorded, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(recorded) != "target=vm-up\n" {
+		t.Fatalf("manage.sh получил:\n%s", recorded)
+	}
+}
+
+func TestExecuteAcceptsFlagsAfterName(t *testing.T) {
+	root, log := fakeProject(t, 0)
+	console, _, errorsOutput := quietStreams("")
+	code := execute([]string{"logs", "vm-02", "--service", "proxy", "--tail", "100", "--follow",
+		"--root", root}, console)
+	if code != 0 {
+		t.Fatalf("код %d, ошибки: %s", code, errorsOutput)
+	}
+	recorded, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "target=vm-logs\nVM=vm-02\nLOG_TAIL=100\nLOG_SERVICE=proxy\nLOG_FOLLOW=1\n"
+	if string(recorded) != expected {
+		t.Fatalf("manage.sh получил:\n%s\nожидалось:\n%s", recorded, expected)
 	}
 }

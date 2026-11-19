@@ -82,6 +82,32 @@ func TestParseArgsBuildsManageEnvironment(t *testing.T) {
 			target:      "vm-profile",
 			environment: map[string]string{"VM": "vm-02"},
 		},
+		{
+			name:   "флаги после имени VM",
+			args:   []string{"logs", "vm-02", "--service", "proxy", "--tail", "100", "--follow"},
+			target: "vm-logs",
+			environment: map[string]string{"VM": "vm-02", "LOG_TAIL": "100",
+				"LOG_SERVICE": "proxy", "LOG_FOLLOW": "1"},
+		},
+		{
+			name:   "флаги вокруг имени VM",
+			args:   []string{"git", "--repo", "owner/name", "vm-02", "--write", "work"},
+			target: "vm-git",
+			environment: map[string]string{"VM": "vm-02", "REPO": "owner/name",
+				"GIT_WRITE": "1", "GIT_WRITE_BRANCH": "work"},
+		},
+		{
+			name:        "бюджет после имени VM",
+			args:        []string{"new", "vm-03", "--cpu", "4", "--ram", "8192"},
+			target:      "vm-setup",
+			environment: map[string]string{"VM": "vm-03", "VCPU": "4", "RAM_MB": "8192"},
+		},
+		{
+			name:        "сессия агента после имени VM",
+			args:        []string{"claude", "vm-02", "--project", "demo"},
+			target:      "claude",
+			environment: map[string]string{"VM": "vm-02", "PROJECT": "demo"},
+		},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -142,6 +168,15 @@ func TestParseArgsRejects(t *testing.T) {
 		"resume вне claude":            {"console", "--resume", "abc", "vm-01"},
 		"несовместимые флаги удаления": {"rm", "--keep-disk", "--delete-disk", "vm-01"},
 		"неизвестный флаг":             {"up", "--turbo", "vm-01"},
+		"флаг после имени неизвестен":   {"up", "vm-01", "--turbo"},
+		"две VM вокруг флага":           {"logs", "vm-01", "--tail", "10", "vm-02"},
+		"аргумент у списка":             {"ls", "vm-01"},
+		"аргумент у справки":            {"help", "ls"},
+		"аргумент у версии":             {"version", "vm-01"},
+		"аргумент у меню":               {"menu", "vm-01"},
+		"tail с ведущим нулём":          {"logs", "--tail", "007", "vm-01"},
+		"tail со знаком":                {"logs", "--tail", "+5", "vm-01"},
+		"tail слишком большой":          {"logs", "--tail", "1000000", "vm-01"},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -173,6 +208,16 @@ func TestParseRemoveKeepsDiskByDefault(t *testing.T) {
 	if !strings.Contains(dropped.confirm, "диск") {
 		t.Fatalf("подтверждение должно называть диск: %q", dropped.confirm)
 	}
+	kept, err := parseArgs([]string{"rm", "--keep-disk", "vm-02"})
+	if err != nil {
+		t.Fatalf("разбор не удался: %v", err)
+	}
+	if kept.confirm == "" {
+		t.Fatal("--keep-disk выбирает судьбу диска, но не отменяет подтверждение")
+	}
+	if kept.environment["DISK_KEEP"] != "1" {
+		t.Fatalf("--keep-disk должен сохранять диск, получено %q", kept.environment["DISK_KEEP"])
+	}
 	silent, err := parseArgs([]string{"rm", "--delete-disk", "--yes", "vm-02"})
 	if err != nil {
 		t.Fatalf("разбор не удался: %v", err)
@@ -197,5 +242,43 @@ func TestTakeRoot(t *testing.T) {
 	rest, root, err = takeRoot([]string{"ls"})
 	if err != nil || root != "" || !reflect.DeepEqual(rest, []string{"ls"}) {
 		t.Fatalf("получено %v %q %v", rest, root, err)
+	}
+	// Флаг снимается и после команды, иначе он молча потерялся бы.
+	rest, root, err = takeRoot([]string{"logs", "vm-02", "--root", "/opt/agent-docker", "--follow"})
+	if err != nil || root != "/opt/agent-docker" ||
+		!reflect.DeepEqual(rest, []string{"logs", "vm-02", "--follow"}) {
+		t.Fatalf("получено %v %q %v", rest, root, err)
+	}
+	if _, _, err := takeRoot([]string{"ls", "--root"}); err == nil {
+		t.Fatal("--root без значения должен быть ошибкой и в конце строки")
+	}
+}
+
+func TestFlattenClearsUnsetManagedVariables(t *testing.T) {
+	pairs := flatten(map[string]string{"VM": "vm-02", "LOG_TAIL": "50"})
+	found := make(map[string]string, len(pairs))
+	for _, pair := range pairs {
+		key, value, _ := strings.Cut(pair, "=")
+		found[key] = value
+	}
+	for _, name := range managed {
+		value, present := found[name]
+		if !present {
+			t.Fatalf("переменная %s должна передаваться явно", name)
+		}
+		switch name {
+		case "VM":
+			if value != "vm-02" {
+				t.Fatalf("VM=%q", value)
+			}
+		case "LOG_TAIL":
+			if value != "50" {
+				t.Fatalf("LOG_TAIL=%q", value)
+			}
+		default:
+			if value != "" {
+				t.Fatalf("%s должна быть пустой, получено %q", name, value)
+			}
+		}
 	}
 }

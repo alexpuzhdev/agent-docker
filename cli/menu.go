@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -133,7 +132,10 @@ func runMenu(root string, console streams) int {
 		case actionRefresh:
 			continue
 		case actionCreate:
-			notice = outside(screen, console, func() { createVM(root, console) })
+			if err := outside(screen, console, func() { createVM(root, console) }); err != nil {
+				fmt.Fprintln(console.errors, err)
+				return 1
+			}
 			continue
 		}
 		target, known := keyActions[key]
@@ -148,22 +150,23 @@ func runMenu(root string, console streams) int {
 			continue
 		}
 		selected := vms[cursor]
-		notice = outside(screen, console, func() { menuTarget(root, target, selected, console) })
+		if err := outside(screen, console, func() { menuTarget(root, target, selected, console) }); err != nil {
+			fmt.Fprintln(console.errors, err)
+			return 1
+		}
 	}
 }
 
 // outside выполняет действие в обычном режиме терминала и возвращает меню
-// в неформатированный режим. Ошибка переключения становится сообщением.
-func outside(screen *terminal, console streams, body func()) string {
+// в неформатированный режим. Если вернуть режим не удалось, меню закрывается:
+// продолжать в построчном вводе означало бы не реагировать на клавиши.
+func outside(screen *terminal, console streams, body func()) error {
 	screen.cooked()
 	fmt.Fprint(console.output, "\x1b[2J\x1b[H")
 	body()
 	fmt.Fprint(console.output, "\nНажмите Enter, чтобы вернуться в меню. ")
-	bufio.NewReader(console.input).ReadString('\n')
-	if err := screen.raw(); err != nil {
-		return err.Error()
-	}
-	return ""
+	console.input.ReadString('\n')
+	return screen.raw()
 }
 
 // menuTarget запускает выбранное действие над гостем.
@@ -189,7 +192,7 @@ func menuTarget(root, target string, vm VM, console streams) {
 
 // createVM спрашивает имя и бюджет нового гостя и запускает подготовку.
 func createVM(root string, console streams) {
-	reader := bufio.NewReader(console.input)
+	reader := console.input
 	fmt.Fprint(console.output, "Имя новой VM (например vm-03): ")
 	name, err := reader.ReadString('\n')
 	if err != nil && strings.TrimSpace(name) == "" {
