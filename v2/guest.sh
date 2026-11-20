@@ -2,7 +2,9 @@
 set -euo pipefail
 test -f /images/.ready
 profile_args=(/guest/profile.json "$VM_NAME" "$VCPU" "$RAM_MB" "$DISK_GB")
+existing=0
 if test -e /guest/disk.qcow2; then
+    existing=1
     profile_args+=(--retain-existing-identity)
 fi
 identity=$(python3 /opt/agent-docker/vm-profile.py "${profile_args[@]}")
@@ -27,13 +29,34 @@ fi
 python3 /opt/agent-docker/seed.py
 genisoimage -quiet -o /guest/seed.iso -volid cidata -joliet -rock /guest/seed
 rm -f /guest/serial.sock /guest/qmp.sock /guest/console.pending
+# Данные cloud-init: новому гостю они подключаются как virtio-blk, и это
+# убирает из процесса QEMU эмуляцию ATAPI. Созданный ранее гость сохраняет
+# прежний CD-ROM: скрипт подготовки попадает внутрь один раз через
+# cloud-init write_files, поэтому у такого гостя он продолжает монтировать
+# /dev/sr0 и без этого устройства перестал бы работать. Выбор фиксируется
+# маркером при создании: менять способ подключения у работающего гостя
+# нельзя. Слот seed закреплён старшим, чтобы системный диск всегда получал
+# меньший номер и оставался /dev/vda.
+if (( existing )) && ! test -e /guest/.seed-virtio; then
+    seed=(-drive 'file=/guest/seed.iso,media=cdrom,readonly=on')
+else
+    seed=(-drive 'file=/guest/seed.iso,if=none,id=seed,format=raw,readonly=on'
+        -device 'virtio-blk-pci,drive=seed,addr=0x1e')
+    touch /guest/.seed-virtio
+fi
+
+# -cpu host,-vmx,-svm отключает вложенную виртуализацию внутри гостя, а
+# -sandbox ограничивает системные вызовы самого QEMU: после запуска ему не
+# нужны ни новые процессы, ни повышение прав, ни управление ресурсами.
+# Фильтр seccomp устанавливается без CAP_SYS_ADMIN только потому, что
+# start-vm.sh запускает QEMU с no-new-privs: убрав его, VM не запустится.
 exec qemu-system-x86_64 \
-    -accel kvm -cpu host -smp "$VCPU" -m "$RAM_MB" "${qemu_identity[@]}" \
+    -accel kvm -cpu 'host,-vmx,-svm' -smp "$VCPU" -m "$RAM_MB" "${qemu_identity[@]}" \
+    -sandbox 'on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny' \
     -qmp unix:/guest/qmp.sock,server=on,wait=off \
     -display none -monitor none -nodefaults \
     -chardev socket,id=serial,path=/guest/serial.sock,server=on,wait=off,logfile=/guest/console.log,logappend=off \
     -serial chardev:serial -kernel /images/vmlinuz -initrd /images/initrd.img \
     -append 'root=/dev/vda1 ro console=ttyS0,115200' \
-    "${disk[@]}" \
-    -drive 'file=/guest/seed.iso,media=cdrom,readonly=on' \
+    "${disk[@]}" "${seed[@]}" \
     -netdev user,id=guest-net,ipv6=off -device "$network_device"

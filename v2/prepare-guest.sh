@@ -5,7 +5,16 @@ expected=/var/lib/agent-docker/ready
 mkdir -p "$(dirname "$expected")"
 scratch=$(mktemp -d)
 trap 'if mountpoint -q "$scratch"; then umount "$scratch"; fi; rmdir -- "$scratch"' EXIT
-mount -o ro /dev/sr0 "$scratch"
+# У нового гостя данные cloud-init подключены как virtio-blk, у созданного
+# ранее — как CD-ROM, поэтому устройство ищется по метке образа, а не по
+# фиксированному пути. Выбранное устройство попадает в журнал: без этого
+# отказ монтирования трудно отличить от отсутствия устройства.
+command -v blkid >/dev/null ||
+    { echo 'Не найден blkid: устройство с данными cloud-init не определить.' >&2; exit 1; }
+seed_device=$(blkid -L cidata 2>/dev/null || blkid -L CIDATA 2>/dev/null || true)
+test -n "$seed_device" || seed_device=/dev/sr0
+printf 'Данные cloud-init: %s\n' "$seed_device"
+mount -o ro "$seed_device" "$scratch"
 sed -i '/^# agent-docker domains$/,/^# end agent-docker domains$/d' /etc/hosts
 printf '\n# agent-docker domains\n' >> /etc/hosts
 cat "$scratch/allowed-hosts" >> /etc/hosts

@@ -174,7 +174,54 @@ class GuestQemuArgumentsTest(unittest.TestCase):
         self.assertEqual(self.start('vm-01'), first)
         second = self.start('vm-02')
         self.assertTrue(set(self.option(first, '-smbios')).isdisjoint(self.option(second, '-smbios')))
-        self.assertTrue(set(self.option(first, '-device')).isdisjoint(self.option(second, '-device')))
+        identifying = lambda arguments: {value for value in self.option(arguments, '-device')
+                                          if 'serial=' in value or 'mac=' in value}
+        self.assertTrue(identifying(first))
+        self.assertTrue(identifying(first).isdisjoint(identifying(second)))
+
+    def test_guest_disables_nested_virtualization_and_limits_syscalls(self):
+        arguments = self.start('vm-01')
+        self.assertEqual(self.option(arguments, '-cpu'), ['host,-vmx,-svm'])
+        sandbox = self.option(arguments, '-sandbox')
+        self.assertEqual(len(sandbox), 1, arguments)
+        for restriction in ('on', 'obsolete=deny', 'elevateprivileges=deny',
+                            'spawn=deny', 'resourcecontrol=deny'):
+            self.assertIn(restriction, sandbox[0].split(','))
+
+    def device_position(self, arguments, needle):
+        """Позиция устройства среди аргументов: имена vda и vdb в госте
+        раздаются в порядке создания устройств, а не в порядке -drive."""
+        found = [index for index, value in enumerate(arguments)
+                 if needle in value and index and arguments[index - 1] == '-device']
+        self.assertEqual(len(found), 1, arguments)
+        return found[0]
+
+    def test_new_guest_gets_seed_as_virtio_block_without_cdrom(self):
+        arguments = self.start('vm-01')
+        drives = self.option(arguments, '-drive')
+        seed = [value for value in drives if 'seed.iso' in value]
+        self.assertEqual(len(seed), 1, drives)
+        self.assertIn('if=none,id=seed', seed[0])
+        self.assertIn('readonly=on', seed[0])
+        self.assertFalse(any('cdrom' in value or 'media=' in value for value in drives), drives)
+        # Системный диск должен создаваться раньше seed, иначе root=/dev/vda1
+        # укажет на данные cloud-init. Слот seed закреплён явно.
+        seed_device = self.device_position(arguments, 'drive=seed')
+        self.assertIn('addr=0x1e', arguments[seed_device])
+        self.assertLess(self.device_position(arguments, 'drive=disk0'), seed_device)
+        # Выбор фиксируется при создании: повторный запуск ничего не меняет.
+        self.assertEqual(self.start('vm-01'), arguments)
+
+    def test_existing_guest_keeps_cdrom_seed(self):
+        # Скрипт подготовки внутри созданного ранее гостя монтирует /dev/sr0,
+        # поэтому CD-ROM у него должен остаться.
+        (self.guest('vm-01') / 'disk.qcow2').write_text('')
+        arguments = self.start('vm-01')
+        drives = self.option(arguments, '-drive')
+        self.assertIn('file=' + str(self.guest('vm-01')) + '/seed.iso,media=cdrom,readonly=on', drives)
+        self.assertFalse(any('id=seed' in value for value in drives), drives)
+        self.assertFalse(any('drive=seed' in value for value in self.option(arguments, '-device')))
+        self.assertFalse((self.guest('vm-01') / '.seed-virtio').exists())
 
     def test_existing_disk_without_profile_keeps_platform_defaults(self):
         (self.guest('vm-01') / 'disk.qcow2').write_text('')
@@ -182,7 +229,7 @@ class GuestQemuArgumentsTest(unittest.TestCase):
         self.assertEqual(self.option(arguments, '-uuid'), [])
         self.assertEqual(self.option(arguments, '-smbios'), [])
         self.assertIn(f'file={self.guest("vm-01")}/disk.qcow2,if=virtio,format=qcow2', self.option(arguments, '-drive'))
-        self.assertFalse(any('virtio-blk-pci' in value for value in self.option(arguments, '-device')))
+        self.assertFalse(any('drive=disk0' in value for value in self.option(arguments, '-device')))
         self.assertFalse(any('mac=' in value for value in self.option(arguments, '-device')))
 
     def test_profile_without_serials_keeps_existing_hardware(self):
@@ -200,5 +247,5 @@ class GuestQemuArgumentsTest(unittest.TestCase):
         self.assertEqual(self.option(arguments, '-uuid'), [identity['uuid']])
         self.assertEqual(self.option(arguments, '-smbios'), [])
         self.assertIn(f'file={guest}/disk.qcow2,if=virtio,format=qcow2', self.option(arguments, '-drive'))
-        self.assertFalse(any('virtio-blk-pci' in value for value in self.option(arguments, '-device')))
+        self.assertFalse(any('drive=disk0' in value for value in self.option(arguments, '-device')))
         self.assertEqual(profile.read_bytes(), saved)
