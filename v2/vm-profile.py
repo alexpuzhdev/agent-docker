@@ -1,4 +1,5 @@
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -9,6 +10,7 @@ from pathlib import Path
 
 
 SERIALS = ('system', 'board', 'chassis', 'disk')
+SEEDS = ('virtio', 'cdrom')
 
 
 def generate_identity():
@@ -33,10 +35,50 @@ def publish_profile(path, profile):
             draft_path.unlink()
 
 
-def read_identity(path, expected):
+def replace_profile(path, profile):
+    descriptor, draft = tempfile.mkstemp(dir=path.parent, prefix='profile-')
+    draft_path = Path(draft)
+    try:
+        with os.fdopen(descriptor, 'w') as handle:
+            json.dump(profile, handle, indent=2)
+            handle.write('\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(draft_path, path)
+    finally:
+        draft_path.unlink(missing_ok=True)
+
+
+def read_profile(path, expected):
     profile = json.loads(path.read_text())
     if not isinstance(profile, dict) or any(profile.get(key) != value for key, value in expected.items()):
         raise ValueError('Профиль VM не соответствует версии, имени, ресурсам или ссылке на прокси.')
+    return profile
+
+
+def read_seed(path, profile, requested):
+    # Способ подключения данных cloud-init закрепляется один раз и хранится
+    # рядом с остальным виртуальным оборудованием: менять его у готового
+    # гостя нельзя. Профиль без этого поля остался от предыдущей версии,
+    # поэтому запрошенное значение дописывается на место. Запись идёт под
+    # блокировкой и после повторного чтения: при одновременном запуске
+    # сохранённым должно оказаться одно значение, иначе запущенная VM
+    # получит не то устройство, которое записано в профиле.
+    seed = profile.get('seed')
+    if seed is None:
+        with open(path) as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            stored = json.loads(path.read_text())
+            seed = stored.get('seed')
+            if seed is None:
+                replace_profile(path, {**stored, 'seed': requested})
+                seed = requested
+    if seed not in SEEDS:
+        raise ValueError('В профиле VM ожидался известный способ подключения данных cloud-init.')
+    return seed
+
+
+def read_identity(profile):
     identity = profile['identity']
     if identity is None:
         return None
@@ -67,6 +109,8 @@ def main():
     parser.add_argument('disk_gb', type=int)
     parser.add_argument('--retain-existing-identity', action='store_true',
                         help='Сохранить назначение идентификаторов платформой для существующего диска.')
+    parser.add_argument('--seed', choices=SEEDS, required=True,
+                        help='Способ подключения данных cloud-init для нового профиля.')
     args = parser.parse_args()
     if min(args.vcpu, args.ram_mb, args.disk_gb) <= 0:
         parser.error('Ресурсы VM должны быть положительными.')
@@ -80,12 +124,13 @@ def main():
     try:
         if not args.path.exists():
             identity = None if args.retain_existing_identity else generate_identity()
-            publish_profile(args.path, {**expected, 'identity': identity})
-        identity = read_identity(args.path, expected)
+            publish_profile(args.path, {**expected, 'identity': identity, 'seed': args.seed})
+        profile = read_profile(args.path, expected)
+        identity = read_identity(profile)
+        seed = read_seed(args.path, profile, args.seed)
     except (OSError, ValueError, KeyError) as error:
         parser.exit(1, f'Не удалось загрузить профиль VM: {error}\n')
-    if identity is not None:
-        print(*identity)
+    print(seed, *(identity or ()))
 
 
 if __name__ == '__main__':

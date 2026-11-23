@@ -1,9 +1,11 @@
+import fcntl
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -20,26 +22,36 @@ class VmProfileTest(unittest.TestCase):
         self.workspace = Path(workspace.name)
 
     def profile(self, name, *options, cpu='2'):
+        # Способ подключения данных cloud-init обязателен, поэтому проверки,
+        # которым он безразличен, запрашивают virtio.
+        if '--seed' not in options:
+            options = (*options, '--seed', 'virtio')
+        return self.generate(str(self.workspace / f'{name}.json'), name, cpu, '1024', '12', *options)
+
+    def generate(self, *arguments, timeout=5):
         return subprocess.run(
-            [sys.executable, str(GENERATOR), str(self.workspace / f'{name}.json'),
-             name, cpu, '1024', '12', *options],
-            capture_output=True, text=True, timeout=5,
+            [sys.executable, str(GENERATOR), *arguments], capture_output=True, text=True, timeout=timeout,
         )
+
+    def saved(self, path):
+        profile = json.loads(path.read_text())
+        return profile.pop('seed', None), profile
 
     def test_new_guest_gets_distinct_persistent_uuid_and_mac(self):
         first = self.profile('vm-01')
         second = self.profile('vm-02')
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(second.returncode, 0, second.stderr)
-        vm_uuid, mac, *serials = first.stdout.split()
+        seed, vm_uuid, mac, *serials = first.stdout.split()
+        self.assertEqual(seed, 'virtio')
         self.assertEqual(uuid.UUID(vm_uuid).version, 4)
         self.assertEqual(int(mac[:2], 16) & 3, 2)
         self.assertEqual(len(serials), 4)
         for serial in serials:
             self.assertRegex(serial, r'^[0-9A-F]{20}$')
         self.assertEqual(len(set(serials)), 4)
-        other = second.stdout.split()
-        for own, foreign in zip(first.stdout.split(), other):
+        other = second.stdout.split()[1:]
+        for own, foreign in zip(first.stdout.split()[1:], other):
             self.assertNotEqual(own, foreign)
         path = self.workspace / 'vm-01.json'
         saved = path.read_bytes()
@@ -49,20 +61,24 @@ class VmProfileTest(unittest.TestCase):
             'serials': dict(zip(('system', 'board', 'chassis', 'disk'), serials)),
         })
         self.assertEqual(profile['proxy_ref'], 'vm-01')
+        self.assertEqual(profile['seed'], 'virtio')
         restarted = self.profile('vm-01', '--retain-existing-identity')
         self.assertEqual(restarted.returncode, 0, restarted.stderr)
         self.assertEqual(restarted.stdout, first.stdout)
         self.assertEqual(path.read_bytes(), saved)
 
     def test_existing_disk_keeps_platform_defaults(self):
-        first = self.profile('vm-01', '--retain-existing-identity')
+        first = self.profile('vm-01', '--retain-existing-identity', '--seed', 'cdrom')
         self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertEqual(first.stdout, '')
+        self.assertEqual(first.stdout, 'cdrom\n')
         path = self.workspace / 'vm-01.json'
         self.assertIsNone(json.loads(path.read_bytes())['identity'])
+        # Сохранённый способ подключения важнее запрошенного: иначе
+        # устройство у готового гостя сменилось бы на следующем запуске.
         repeated = self.profile('vm-01')
         self.assertEqual(repeated.returncode, 0, repeated.stderr)
-        self.assertEqual(repeated.stdout, '')
+        self.assertEqual(repeated.stdout, 'cdrom\n')
+        self.assertEqual(json.loads(path.read_bytes())['seed'], 'cdrom')
 
     def test_mismatched_resources_keep_saved_profile(self):
         created = self.profile('vm-01')
@@ -74,23 +90,51 @@ class VmProfileTest(unittest.TestCase):
         self.assertIn('не соответствует', mismatched.stderr)
         self.assertEqual(path.read_bytes(), saved)
 
-    def saved_profile(self, name, identity):
+    def saved_profile(self, name, identity, seed=None):
         path = self.workspace / f'{name}.json'
-        path.write_text(json.dumps({
+        profile = {
             'schema_version': 1, 'vm_id': name,
             'resources': {'vcpu': 2, 'ram_mb': 1024, 'disk_gb': 12},
             'proxy_ref': name, 'identity': identity,
-        }, indent=2) + '\n')
+        }
+        if seed is not None:
+            profile['seed'] = seed
+        path.write_text(json.dumps(profile, indent=2) + '\n')
         return path, path.read_bytes()
 
     def test_profile_without_serials_keeps_existing_hardware(self):
         identity = {'uuid': str(uuid.uuid4()), 'mac': '02:11:22:33:44:55'}
-        path, saved = self.saved_profile('vm-01', identity)
+        path, saved = self.saved_profile('vm-01', identity, seed='cdrom')
         for options in ((), ('--retain-existing-identity',)):
             result = self.profile('vm-01', *options)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.split(), [identity['uuid'], identity['mac']])
+            self.assertEqual(result.stdout.split(), ['cdrom', identity['uuid'], identity['mac']])
         self.assertEqual(path.read_bytes(), saved)
+
+    def test_profile_without_seed_records_requested_transport(self):
+        # Профиль прошлой версии поля seed не содержит. Запрошенный способ
+        # дописывается на место, остальное остаётся как было.
+        identity = {'uuid': str(uuid.uuid4()), 'mac': '02:11:22:33:44:55'}
+        path, saved = self.saved_profile('vm-01', identity)
+        first = self.profile('vm-01', '--seed', 'cdrom')
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(first.stdout.split(), ['cdrom', identity['uuid'], identity['mac']])
+        self.assertEqual(self.saved(path), ('cdrom', json.loads(saved)))
+        repeated = self.profile('vm-01', '--seed', 'virtio')
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        self.assertEqual(repeated.stdout, first.stdout)
+        self.assertEqual(json.loads(path.read_text())['seed'], 'cdrom')
+
+    def test_unknown_seed_keeps_saved_profile(self):
+        identity = {'uuid': str(uuid.uuid4()), 'mac': '02:11:22:33:44:55'}
+        for seed in ('sata', '', 'VIRTIO', True, ['virtio']):
+            with self.subTest(seed=seed):
+                path, saved = self.saved_profile('vm-01', identity, seed=seed)
+                result = self.profile('vm-01')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('способ подключения', result.stderr)
+                self.assertEqual(result.stdout, '')
+                self.assertEqual(path.read_bytes(), saved)
 
     def test_invalid_serials_keep_saved_profile(self):
         base = {'uuid': str(uuid.uuid4()), 'mac': '02:11:22:33:44:55'}
@@ -105,6 +149,65 @@ class VmProfileTest(unittest.TestCase):
                 self.assertIn('серийные номера', result.stderr)
                 self.assertEqual(result.stdout, '')
                 self.assertEqual(path.read_bytes(), saved)
+
+    def test_seed_is_required(self):
+        # Запрошенный способ закрепляется в профиле навсегда, поэтому
+        # значение по умолчанию недопустимо: его легко применить не к тому
+        # гостю, и у созданного ранее гостя устройство исчезло бы.
+        path = self.workspace / 'vm-01.json'
+        result = self.generate(str(path), 'vm-01', '2', '1024', '12')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--seed', result.stderr)
+        self.assertFalse(path.exists())
+
+    def test_migration_waits_for_profile_lock(self):
+        # Чужая блокировка должна останавливать дополнение профиля, иначе
+        # одновременные запуски запишут разные значения.
+        identity = {'uuid': str(uuid.uuid4()), 'mac': '02:11:22:33:44:55'}
+        path, saved = self.saved_profile('vm-01', identity)
+        with open(path) as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.generate(str(path), 'vm-01', '2', '1024', '12', '--seed', 'cdrom', timeout=2)
+        self.assertEqual(path.read_bytes(), saved)
+        result = self.profile('vm-01', '--seed', 'cdrom')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(path.read_text())['seed'], 'cdrom')
+
+    def test_migration_rereads_profile_under_lock(self):
+        # Пока дополнение профиля ждёт блокировку, значение может появиться
+        # из другого запуска. Записывать своё поверх него нельзя: VM уже
+        # запущена с тем устройством, которое записано в профиле.
+        identity = {'uuid': str(uuid.uuid4()), 'mac': '02:11:22:33:44:55'}
+        path, _ = self.saved_profile('vm-01', identity)
+        with open(path) as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            child = subprocess.Popen(
+                [sys.executable, str(GENERATOR), str(path), 'vm-01', '2', '1024', '12', '--seed', 'virtio'],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            self.addCleanup(child.kill)
+            time.sleep(0.5)
+            self.saved_profile('vm-01', identity, seed='cdrom')
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        stdout, stderr = child.communicate(timeout=5)
+        self.assertEqual(child.returncode, 0, stderr)
+        self.assertEqual(stdout.split(), ['cdrom', identity['uuid'], identity['mac']])
+        self.assertEqual(json.loads(path.read_text())['seed'], 'cdrom')
+
+    def test_parallel_migration_records_one_transport(self):
+        # Профиль прошлой версии дополняется под блокировкой: при
+        # одновременном запуске сохранённое значение должно совпасть с тем,
+        # что получили оба вызова.
+        identity = {'uuid': str(uuid.uuid4()), 'mac': '02:11:22:33:44:55'}
+        path, _ = self.saved_profile('vm-01', identity)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            jobs = [executor.submit(self.profile, 'vm-01', '--seed', seed) for seed in ('cdrom', 'virtio')]
+        first, second = [job.result() for job in jobs]
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(first.stdout, second.stdout)
+        self.assertEqual(json.loads(path.read_text())['seed'], first.stdout.split()[0])
+        self.assertEqual(len(list(self.workspace.iterdir())), 1)
 
     def test_parallel_creation_uses_one_saved_identity(self):
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -209,19 +312,47 @@ class GuestQemuArgumentsTest(unittest.TestCase):
         seed_device = self.device_position(arguments, 'drive=seed')
         self.assertIn('addr=0x1e', arguments[seed_device])
         self.assertLess(self.device_position(arguments, 'drive=disk0'), seed_device)
-        # Выбор фиксируется при создании: повторный запуск ничего не меняет.
+        # Выбор фиксируется в профиле при создании: повторный запуск ничего
+        # не меняет, и файлов рядом с профилем для этого не нужно.
+        profile = json.loads((self.guest('vm-01') / 'profile.json').read_text())
+        self.assertEqual(profile['seed'], 'virtio')
+        self.assertFalse((self.guest('vm-01') / '.seed-virtio').exists())
         self.assertEqual(self.start('vm-01'), arguments)
 
     def test_existing_guest_keeps_cdrom_seed(self):
-        # Скрипт подготовки внутри созданного ранее гостя монтирует /dev/sr0,
-        # поэтому CD-ROM у него должен остаться.
-        (self.guest('vm-01') / 'disk.qcow2').write_text('')
+        # Скрипт подготовки внутри созданного ранее гостя ищет устройство
+        # так, как умел при создании, поэтому CD-ROM у него должен остаться.
+        guest = self.guest('vm-01')
+        (guest / 'disk.qcow2').write_text('')
         arguments = self.start('vm-01')
         drives = self.option(arguments, '-drive')
-        self.assertIn('file=' + str(self.guest('vm-01')) + '/seed.iso,media=cdrom,readonly=on', drives)
+        self.assertIn(f'file={guest}/seed.iso,media=cdrom,readonly=on', drives)
         self.assertFalse(any('id=seed' in value for value in drives), drives)
         self.assertFalse(any('drive=seed' in value for value in self.option(arguments, '-device')))
-        self.assertFalse((self.guest('vm-01') / '.seed-virtio').exists())
+        self.assertEqual(json.loads((guest / 'profile.json').read_text())['seed'], 'cdrom')
+        self.assertEqual(self.start('vm-01'), arguments)
+
+    def test_seed_transport_survives_lost_marker(self):
+        # Решение о модели устройства живёт в профиле: восстановление тома
+        # без скрытых файлов не должно переводить гостя обратно на CD-ROM.
+        guest = self.guest('vm-01')
+        arguments = self.start('vm-01')
+        (guest / 'disk.qcow2').write_text('')
+        (guest / '.seed-virtio').unlink(missing_ok=True)
+        self.assertEqual(self.start('vm-01'), arguments)
+        self.assertTrue(any('drive=seed' in value for value in self.option(arguments, '-device')))
+
+    def test_guest_created_with_marker_keeps_virtio_seed(self):
+        # Гость, созданный промежуточной версией, хранил выбор маркером.
+        # Значение переносится в профиль и дальше берётся оттуда.
+        guest = self.guest('vm-01')
+        (guest / 'disk.qcow2').write_text('')
+        (guest / '.seed-virtio').write_text('')
+        arguments = self.start('vm-01')
+        self.assertEqual(json.loads((guest / 'profile.json').read_text())['seed'], 'virtio')
+        self.assertTrue(any('drive=seed' in value for value in self.option(arguments, '-device')))
+        (guest / '.seed-virtio').unlink()
+        self.assertEqual(self.start('vm-01'), arguments)
 
     def test_existing_disk_without_profile_keeps_platform_defaults(self):
         (self.guest('vm-01') / 'disk.qcow2').write_text('')
@@ -242,10 +373,12 @@ class GuestQemuArgumentsTest(unittest.TestCase):
             'resources': {'vcpu': 2, 'ram_mb': 1024, 'disk_gb': 12},
             'proxy_ref': 'vm-01', 'identity': identity,
         }) + '\n')
-        saved = profile.read_bytes()
+        saved = json.loads(profile.read_text())
         arguments = self.start('vm-01')
         self.assertEqual(self.option(arguments, '-uuid'), [identity['uuid']])
         self.assertEqual(self.option(arguments, '-smbios'), [])
         self.assertIn(f'file={guest}/disk.qcow2,if=virtio,format=qcow2', self.option(arguments, '-drive'))
         self.assertFalse(any('drive=disk0' in value for value in self.option(arguments, '-device')))
-        self.assertEqual(profile.read_bytes(), saved)
+        # Профиль прошлой версии дополняется только способом подключения:
+        # оборудование существующего гостя остаётся прежним.
+        self.assertEqual(json.loads(profile.read_text()), {**saved, 'seed': 'cdrom'})

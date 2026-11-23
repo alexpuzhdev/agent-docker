@@ -7,20 +7,37 @@ if test -e /guest/disk.qcow2; then
     existing=1
     profile_args+=(--retain-existing-identity)
 fi
-identity=$(python3 /opt/agent-docker/vm-profile.py "${profile_args[@]}")
+# Данные cloud-init новому гостю подключаются как virtio-blk, и это убирает
+# из процесса QEMU эмуляцию ATAPI. Созданный ранее гость сохраняет прежний
+# CD-ROM: скрипт подготовки попадает внутрь один раз через cloud-init
+# write_files, поэтому у такого гостя он продолжает искать устройство так,
+# как умел при создании. Запрошенный способ учитывается только при первом
+# запуске: дальше решение берётся из профиля вместе с остальным
+# виртуальным оборудованием. Маркер прежних версий остаётся признаком
+# гостя, уже переведённого на virtio.
+requested=virtio
+if (( existing )) && ! test -e /guest/.seed-virtio; then
+    requested=cdrom
+fi
+profile_args+=(--seed "$requested")
+profile=$(python3 /opt/agent-docker/vm-profile.py "${profile_args[@]}")
+read -r -a fields <<< "$profile"
+seed_transport=${fields[0]:-}
+identity=("${fields[@]:1}")
+[[ $seed_transport = virtio || $seed_transport = cdrom ]] ||
+    { echo 'Неизвестный способ подключения данных cloud-init в профиле VM.' >&2; exit 1; }
 qemu_identity=()
 network_device=virtio-net-pci,netdev=guest-net,romfile=
 disk=(-drive file=/guest/disk.qcow2,if=virtio,format=qcow2)
-if test -n "$identity"; then
-    read -r -a fields <<< "$identity"
-    (( ${#fields[@]} == 2 || ${#fields[@]} == 6 )) || { echo 'Некорректная идентичность VM в профиле.' >&2; exit 1; }
-    qemu_identity=(-uuid "${fields[0]}")
-    network_device+=,mac=${fields[1]}
-    if (( ${#fields[@]} == 6 )); then
-        qemu_identity+=(-smbios "type=1,serial=${fields[2]}" -smbios "type=2,serial=${fields[3]}"
-            -smbios "type=3,serial=${fields[4]}")
+if (( ${#identity[@]} )); then
+    (( ${#identity[@]} == 2 || ${#identity[@]} == 6 )) || { echo 'Некорректная идентичность VM в профиле.' >&2; exit 1; }
+    qemu_identity=(-uuid "${identity[0]}")
+    network_device+=,mac=${identity[1]}
+    if (( ${#identity[@]} == 6 )); then
+        qemu_identity+=(-smbios "type=1,serial=${identity[2]}" -smbios "type=2,serial=${identity[3]}"
+            -smbios "type=3,serial=${identity[4]}")
         disk=(-drive file=/guest/disk.qcow2,if=none,id=disk0,format=qcow2
-            -device "virtio-blk-pci,drive=disk0,serial=${fields[5]}")
+            -device "virtio-blk-pci,drive=disk0,serial=${identity[5]}")
     fi
 fi
 if ! test -e /guest/disk.qcow2; then
@@ -29,20 +46,13 @@ fi
 python3 /opt/agent-docker/seed.py
 genisoimage -quiet -o /guest/seed.iso -volid cidata -joliet -rock /guest/seed
 rm -f /guest/serial.sock /guest/qmp.sock /guest/console.pending
-# Данные cloud-init: новому гостю они подключаются как virtio-blk, и это
-# убирает из процесса QEMU эмуляцию ATAPI. Созданный ранее гость сохраняет
-# прежний CD-ROM: скрипт подготовки попадает внутрь один раз через
-# cloud-init write_files, поэтому у такого гостя он продолжает монтировать
-# /dev/sr0 и без этого устройства перестал бы работать. Выбор фиксируется
-# маркером при создании: менять способ подключения у работающего гостя
-# нельзя. Слот seed закреплён старшим, чтобы системный диск всегда получал
-# меньший номер и оставался /dev/vda.
-if (( existing )) && ! test -e /guest/.seed-virtio; then
+# Слот seed закреплён старшим, чтобы системный диск всегда получал меньший
+# номер и оставался /dev/vda.
+if [[ $seed_transport = cdrom ]]; then
     seed=(-drive 'file=/guest/seed.iso,media=cdrom,readonly=on')
 else
     seed=(-drive 'file=/guest/seed.iso,if=none,id=seed,format=raw,readonly=on'
         -device 'virtio-blk-pci,drive=seed,addr=0x1e')
-    touch /guest/.seed-virtio
 fi
 
 # -cpu host,-vmx,-svm отключает вложенную виртуализацию внутри гостя, а
