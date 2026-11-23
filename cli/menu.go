@@ -36,6 +36,24 @@ func (console *terminal) raw() error {
 	return nil
 }
 
+// drain выбрасывает ввод, накопившийся за время работы команды. Пока список
+// ждал Enter, лишние клавиши доставались этому ожиданию; без паузы их никто
+// не читает, и нажатое в консоли гостя после Ctrl+] сработало бы действием
+// над гостем. Отказ stty здесь безвреден: тогда ввод просто остаётся как был.
+func (console *terminal) drain() {
+	if _, err := stty("min", "0", "time", "0"); err != nil {
+		return
+	}
+	defer stty("min", "1", "time", "0")
+	buffer := make([]byte, 4096)
+	for {
+		count, err := os.Stdin.Read(buffer)
+		if err != nil || count == 0 {
+			return
+		}
+	}
+}
+
 func (console *terminal) cooked() {
 	if console.saved != "" {
 		stty(strings.Fields(console.saved)...)
@@ -103,6 +121,12 @@ func readKey() (byte, error) {
 	return data[0], nil
 }
 
+// sessionTargets — цели, после которых список открывается сразу, без запроса
+// Enter. Из консоли гостя и из агента выходят по Ctrl+], и ещё одно нажатие
+// мешало бы сразу перейти к следующему гостю. Вывод читающих целей, наоборот,
+// нужно успеть прочитать, поэтому для них пауза остаётся.
+var sessionTargets = map[string]bool{"vm-console": true, "claude": true}
+
 // runMenu показывает список окружений и выполняет над ними действия.
 // Без терминала меню открыть нельзя, поэтому печатается справка.
 func runMenu(root string, console streams) int {
@@ -120,6 +144,9 @@ func runMenu(root string, console streams) int {
 	// их место занимает строка состояния под списком.
 	quiet := streams{input: console.input, output: console.output, errors: io.Discard}
 	cursor := 0
+	// chosen — имя выбранного гостя. Список перечитывается на каждом кадре,
+	// поэтому выбор восстанавливается по имени, а не по номеру строки.
+	chosen := ""
 	notice := ""
 	for {
 		vms, err := inventory(root, quiet)
@@ -127,7 +154,8 @@ func runMenu(root string, console streams) int {
 			notice = err.Error()
 			vms = nil
 		}
-		cursor = moveCursor(cursor, 0, len(vms))
+		cursor = selectVM(vms, chosen, cursor)
+		chosen = selectedName(vms, cursor)
 		height, width := terminalSize()
 		fmt.Fprint(console.output, "\x1b[2J\x1b[H"+
 			renderMenu(vms, cursor, width, height, root, notice, time.Now()))
@@ -142,14 +170,16 @@ func runMenu(root string, console streams) int {
 			return 0
 		case actionUp:
 			cursor = moveCursor(cursor, -1, len(vms))
+			chosen = selectedName(vms, cursor)
 			continue
 		case actionDown:
 			cursor = moveCursor(cursor, 1, len(vms))
+			chosen = selectedName(vms, cursor)
 			continue
 		case actionRefresh:
 			continue
 		case actionCreate:
-			if err := outside(screen, console, func() { createVM(root, console) }); err != nil {
+			if err := outside(screen, console, true, func() { createVM(root, console) }); err != nil {
 				fmt.Fprintln(console.errors, err)
 				return 1
 			}
@@ -164,12 +194,16 @@ func runMenu(root string, console streams) int {
 			continue
 		}
 		selected := vms[cursor]
+		chosen = selected.Name
 		project := ""
 		if key == 13 {
 			// Enter возвращает туда, где работали в прошлый раз.
 			target = lastSession(selected)
 		}
-		if err := outside(screen, console, func() { menuTarget(root, target, selected, project, console) }); err != nil {
+		pause := !sessionTargets[target]
+		if err := outside(screen, console, pause, func() {
+			menuTarget(root, target, selected, project, console)
+		}); err != nil {
 			fmt.Fprintln(console.errors, err)
 			return 1
 		}
@@ -179,13 +213,22 @@ func runMenu(root string, console streams) int {
 // outside выполняет действие в обычном режиме терминала и возвращает меню
 // в неформатированный режим. Если вернуть режим не удалось, меню закрывается:
 // продолжать в построчном вводе означало бы не реагировать на клавиши.
-func outside(screen *terminal, console streams, body func()) error {
+// Пауза перед возвратом нужна там, где на экране остался вывод команды.
+func outside(screen *terminal, console streams, pause bool, body func()) error {
 	screen.cooked()
 	fmt.Fprint(console.output, "\x1b[2J\x1b[H")
 	body()
-	fmt.Fprint(console.output, "\nНажмите Enter, чтобы вернуться в меню. ")
-	console.input.ReadString('\n')
-	return screen.raw()
+	if pause {
+		fmt.Fprint(console.output, "\nНажмите Enter, чтобы вернуться в список. ")
+		console.input.ReadString('\n')
+	}
+	if err := screen.raw(); err != nil {
+		return err
+	}
+	if !pause {
+		screen.drain()
+	}
+	return nil
 }
 
 // menuTarget запускает выбранное действие над гостем.

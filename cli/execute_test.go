@@ -163,6 +163,37 @@ func TestExecuteHelpAndVersion(t *testing.T) {
 	}
 }
 
+// Интерактивные режимы без терминала печатают справку и не трогают manage.sh:
+// иначе agd в конвейере или из скрипта пытался бы захватить ввод.
+func TestExecuteInteractiveModesWithoutTerminal(t *testing.T) {
+	if interactive() {
+		t.Skip("проверка рассчитана на ввод без терминала")
+	}
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"список по умолчанию", nil},
+		{"список по имени", []string{"menu"}},
+		{"строка команд", []string{"cmd"}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			root, log := fakeProject(t, 0)
+			console, output, errorsOutput := quietStreams("")
+			if code := execute(append([]string{"--root", root}, test.args...), console); code != 0 {
+				t.Fatalf("код %d, ошибки: %s", code, errorsOutput)
+			}
+			if !strings.Contains(output.String(), "agd cmd") {
+				t.Fatalf("без терминала показывается справка: %s", output)
+			}
+			if _, err := os.Stat(log); err == nil {
+				t.Fatal("интерактивный режим не должен вызывать manage.sh")
+			}
+		})
+	}
+}
+
 func TestExecuteIgnoresInheritedVariables(t *testing.T) {
 	root, log := fakeProject(t, 0)
 	// Экспортированные переменные не должны менять поведение команды:

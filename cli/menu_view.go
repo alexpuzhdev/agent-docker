@@ -67,6 +67,28 @@ func moveCursor(current, delta, count int) int {
 	return next
 }
 
+// selectVM находит строку гостя по имени. Выбор держится за имя, а не за
+// номер строки: после создания, удаления или переименования гостя тот же
+// номер указывал бы на другого, и возврат из консоли терял бы выбор.
+func selectVM(vms []VM, name string, fallback int) int {
+	for index, vm := range vms {
+		if vm.Name == name {
+			return index
+		}
+	}
+	// Выбранного гостя в списке больше нет: курсор остаётся на том же месте,
+	// прижатый к границам нового списка.
+	return moveCursor(fallback, 0, len(vms))
+}
+
+// selectedName возвращает имя гостя под курсором; у пустого списка имени нет.
+func selectedName(vms []VM, cursor int) string {
+	if cursor < 0 || cursor >= len(vms) {
+		return ""
+	}
+	return vms[cursor].Name
+}
+
 // windowStart выбирает начало видимого окна так, чтобы курсор оставался внутри.
 func windowStart(cursor, visible, count int) int {
 	if visible <= 0 || count <= visible {

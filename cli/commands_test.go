@@ -130,13 +130,14 @@ func TestParseArgsLocalCommands(t *testing.T) {
 		args []string
 		kind string
 	}{
-		"без аргументов открывается строка команд": {args: nil, kind: kindShell},
-		"меню":                                     {args: []string{"menu"}, kind: kindMenu},
-		"возврат в сессию":                         {args: []string{"go", "vm-01"}, kind: kindResume},
-		"список":                                   {args: []string{"ls"}, kind: kindList},
-		"состояние":                                {args: []string{"status", "vm-01"}, kind: kindStatus},
-		"справка":                                  {args: []string{"help"}, kind: kindHelp},
-		"версия":                                   {args: []string{"version"}, kind: kindVersion},
+		"без аргументов открывается список": {args: nil, kind: kindMenu},
+		"список по имени":                   {args: []string{"menu"}, kind: kindMenu},
+		"строка команд":                     {args: []string{"cmd"}, kind: kindShell},
+		"возврат в сессию":                  {args: []string{"go", "vm-01"}, kind: kindResume},
+		"список":                            {args: []string{"ls"}, kind: kindList},
+		"состояние":                         {args: []string{"status", "vm-01"}, kind: kindStatus},
+		"справка":                           {args: []string{"help"}, kind: kindHelp},
+		"версия":                            {args: []string{"version"}, kind: kindVersion},
 	}
 	for name, test := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -176,6 +177,7 @@ func TestParseArgsRejects(t *testing.T) {
 		"аргумент у справки":           {"help", "ls"},
 		"аргумент у версии":            {"version", "vm-01"},
 		"аргумент у меню":              {"menu", "vm-01"},
+		"аргумент у строки команд":     {"cmd", "vm-01"},
 		"tail с ведущим нулём":         {"logs", "--tail", "007", "vm-01"},
 		"tail со знаком":               {"logs", "--tail", "+5", "vm-01"},
 		"tail слишком большой":         {"logs", "--tail", "1000000", "vm-01"},

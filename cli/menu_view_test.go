@@ -124,6 +124,58 @@ func TestRenderMenuScrollsLongList(t *testing.T) {
 	}
 }
 
+func TestSelectVMKeepsGuestByName(t *testing.T) {
+	vms := []VM{{Name: "vm-01"}, {Name: "vm-02"}, {Name: "vm-03"}}
+	if got := selectVM(vms, "vm-02", 0); got != 1 {
+		t.Fatalf("выбранный гость оказался на строке %d", got)
+	}
+	// Перед выбранным гостем появился новый: выбор идёт за именем, а не за
+	// номером строки, иначе возврат из консоли открывал бы другого гостя.
+	grown := []VM{{Name: "vm-00"}, {Name: "vm-01"}, {Name: "vm-02"}, {Name: "vm-03"}}
+	if got := selectVM(grown, "vm-02", 1); got != 2 {
+		t.Fatalf("после пополнения списка выбор оказался на строке %d", got)
+	}
+	// Выбранного гостя удалили: курсор прижимается к границам нового списка.
+	if got := selectVM(vms[:1], "vm-02", 1); got != 0 {
+		t.Fatalf("после удаления выбор оказался на строке %d", got)
+	}
+	if got := selectVM(nil, "vm-02", 1); got != 0 {
+		t.Fatalf("в пустом списке выбор равен %d", got)
+	}
+}
+
+func TestSelectedName(t *testing.T) {
+	vms := []VM{{Name: "vm-01"}, {Name: "vm-02"}}
+	if got := selectedName(vms, 1); got != "vm-02" {
+		t.Fatalf("получено %q", got)
+	}
+	if got := selectedName(vms, 5); got != "" {
+		t.Fatalf("за границей списка имени нет, получено %q", got)
+	}
+	if got := selectedName(nil, 0); got != "" {
+		t.Fatalf("в пустом списке имени нет, получено %q", got)
+	}
+}
+
+// Enter всегда открывает сессию, а выходят из неё по Ctrl+]. Такие цели не
+// должны требовать ещё одного Enter: иначе возврат к списку перестал бы быть
+// мгновенным и перейти к следующему гостю сразу не получилось бы.
+func TestEnterTargetsReturnToListAtOnce(t *testing.T) {
+	running := VM{Name: "vm-01", GuestStatus: "Up 1 minute", Session: &Session{Agent: "claude"}}
+	fresh := VM{Name: "vm-02"}
+	for _, vm := range []VM{running, fresh} {
+		if target := lastSession(vm); !sessionTargets[target] {
+			t.Fatalf("после цели %q список должен открываться сразу", target)
+		}
+	}
+	// Читающие и необратимые цели, наоборот, оставляют вывод на экране.
+	for _, target := range []string{"vm-logs", "vm-profile", "vm-git-status", "vm-remove"} {
+		if sessionTargets[target] {
+			t.Fatalf("вывод цели %q нужно успеть прочитать", target)
+		}
+	}
+}
+
 func TestTruncate(t *testing.T) {
 	if got := truncate("короткая", 20); got != "короткая" {
 		t.Fatalf("получено %q", got)

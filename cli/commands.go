@@ -37,8 +37,10 @@ type action struct {
 
 // parseArgs превращает аргументы командной строки в действие.
 func parseArgs(args []string) (action, error) {
+	// Без аргументов открывается список гостей: это основной экран. Строка
+	// команд со слешем осталась отдельным режимом agd cmd.
 	if len(args) == 0 {
-		return action{kind: kindShell}, nil
+		return action{kind: kindMenu}, nil
 	}
 	name := args[0]
 	rest := args[1:]
@@ -49,6 +51,8 @@ func parseArgs(args []string) (action, error) {
 		return bare(kindVersion, name, rest)
 	case "menu":
 		return bare(kindMenu, name, rest)
+	case "cmd":
+		return bare(kindShell, name, rest)
 	case "go", "resume":
 		vm, err := singleVM(name, rest)
 		return action{kind: kindResume, vm: vm}, err
