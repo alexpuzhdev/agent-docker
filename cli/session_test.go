@@ -59,9 +59,78 @@ func TestLastSession(t *testing.T) {
 	if target := lastSession(fresh); target != "claude" {
 		t.Fatalf("без сессий запускается агент, получено %q", target)
 	}
-	used := VM{Name: "vm-01", Session: &Session{Agent: "claude", Project: "my-api"}}
+	// Состояние гостя приходит из docker ps, поэтому у работающего гостя в
+	// фикстуре обязателен статус Up: без него проверялся бы остановленный
+	// гость, у которого цель другая.
+	used := VM{
+		Name:        "vm-01",
+		GuestStatus: "Up 3 minutes",
+		Session:     &Session{Agent: "claude", Project: "my-api"},
+	}
 	if target := lastSession(used); target != "vm-console" {
 		t.Fatalf("к работающему агенту подключаются через консоль, получено %q", target)
+	}
+	stopped := VM{
+		Name:        "vm-01",
+		GuestStatus: "Exited (0) 2 minutes ago",
+		Session:     &Session{Agent: "claude", Project: "my-api"},
+	}
+	if target := lastSession(stopped); target != "claude" {
+		t.Fatalf("в остановленном госте агента нет, получено %q", target)
+	}
+}
+
+// fakeDocker подкладывает в PATH подставной docker, который отдаёт одну строку
+// состояния контейнера гостя в том же формате, что читает CLI.
+func fakeDocker(t *testing.T, prefix, name, status string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/bash\nprintf '%s\\t%s\\t%s\\n' '" + prefix + "-" + name + "' vm '" + status + "'\n"
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Остальной PATH сохраняется: manage.sh запускается через bash.
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestResumeTargetFollowsGuestState проверяет оба состояния через публичную
+// команду agd go: к работающему гостю возвращаются консолью, остановленный
+// поднимается запуском агента, хотя запись о сессии в нём осталась.
+func TestResumeTargetFollowsGuestState(t *testing.T) {
+	root, log := fakeProject(t, 0)
+	state := t.TempDir()
+	writeVM(t, state, "vm-01", "2 4096 12\n", "")
+	t.Setenv("V2_STATE_DIR", state)
+	t.Setenv("V2_PROJECT_PREFIX", "стенд")
+	fakeDocker(t, "стенд", "vm-01", "Up 3 minutes")
+
+	console, _, errorsOutput := quietStreams("")
+	if code := execute([]string{"--root", root, "claude", "vm-01"}, console); code != 0 {
+		t.Fatalf("код %d, ошибки: %s", code, errorsOutput)
+	}
+	console, _, errorsOutput = quietStreams("")
+	if code := execute([]string{"--root", root, "go", "vm-01"}, console); code != 0 {
+		t.Fatalf("код %d, ошибки: %s", code, errorsOutput)
+	}
+	recorded, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(recorded) != "target=vm-console\nVM=vm-01\n" {
+		t.Fatalf("у работающего гостя agd go вызвал:\n%s", recorded)
+	}
+
+	fakeDocker(t, "стенд", "vm-01", "Exited (0) 1 minute ago")
+	console, _, errorsOutput = quietStreams("")
+	if code := execute([]string{"--root", root, "go", "vm-01"}, console); code != 0 {
+		t.Fatalf("код %d, ошибки: %s", code, errorsOutput)
+	}
+	recorded, err = os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(recorded) != "target=claude\nVM=vm-01\n" {
+		t.Fatalf("у остановленного гостя agd go вызвал:\n%s", recorded)
 	}
 }
 

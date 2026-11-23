@@ -134,8 +134,25 @@ func TestExecuteHelpAndVersion(t *testing.T) {
 	if code := execute([]string{"help"}, console); code != 0 {
 		t.Fatalf("код %d", code)
 	}
-	if !strings.Contains(output.String(), "agd ls") {
-		t.Fatalf("справка: %s", output)
+	text := output.String()
+	// Справка перечисляет команды в таблице без префикса agd, поэтому
+	// проверяются строка использования, общий флаг и запись команды ls
+	// вместе с её описанием.
+	for _, expected := range []string{"agd menu", "--root"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("в справке нет %q: %s", expected, text)
+		}
+	}
+	described := false
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 1 && fields[0] == "ls" && strings.Contains(line, "список гостей") {
+			described = true
+			break
+		}
+	}
+	if !described {
+		t.Fatalf("справка не описывает команду ls: %s", text)
 	}
 	console, output, _ = quietStreams("")
 	if code := execute([]string{"version"}, console); code != 0 {
