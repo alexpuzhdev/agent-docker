@@ -1,0 +1,14 @@
+[Unit]
+Description=Atrice tmux server
+After=systemd-tmpfiles-setup.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=agent
+Group=agent
+WorkingDirectory=/home/agent
+Environment=ATRICE_TMUX_SOCKET=/run/atrice/sessions/atrice DISABLE_UPDATES=1
+# Повторный запуск использует существующий сервер. Сервер остаётся после
+# выхода из последней сессии и принимает следующий запрос прямого входа.
+ExecStart=/usr/bin/tmux -S /run/atrice/sessions/atrice start-server \; set-option -s exit-empty off

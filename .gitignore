@@ -1,3 +1,5 @@
 .env
 
 .v2-state/
+/agd
+__pycache__/

@@ -2,11 +2,15 @@ const fs = require('node:fs');
 const http = require('node:http');
 const net = require('node:net');
 const { connect, readUpstream } = require('./upstream.cjs');
+const { createGitHandler, gitHost } = require('./git-gateway.cjs');
+const { createSniLog } = require('./sni-log.cjs');
 
 const upstream = readUpstream('/config/upstream');
 const domains = new Set(fs.readFileSync('/config/allowed-domains', 'utf8')
     .split('\n').map(line => line.split('#', 1)[0].trim().toLowerCase()).filter(Boolean));
 const listen = process.env.GATEWAY_IP;
+const handleGit = createGitHandler();
+const logSni = createSniLog(process.env.GATEWAY_SNI_LOG === '1');
 
 function sniFromHello(hello) {
     try {
@@ -46,16 +50,24 @@ net.createServer(client => {
     client.setTimeout(6000, () => client.destroy());
     const receive = chunk => {
         wire = Buffer.concat([wire, chunk]);
-        if (wire.length > 65536) return client.destroy();
+        if (wire.length > 65536) {
+            logSni('', false);
+            return client.destroy();
+        }
         while (wire.length >= cursor + 5) {
-            if (wire[cursor] !== 22) return client.destroy();
+            if (wire[cursor] !== 22) {
+                logSni('', false);
+                return client.destroy();
+            }
             const end = cursor + 5 + wire.readUInt16BE(cursor + 3);
             if (wire.length < end) return;
             hello = Buffer.concat([hello, wire.subarray(cursor + 5, end)]);
             cursor = end;
             if (hello.length < 4 || hello.length < 4 + hello.readUIntBE(1, 3)) continue;
             const domain = sniFromHello(hello);
-            if (!domains.has(domain)) return client.destroy();
+            const allowed = domains.has(domain);
+            logSni(domain, allowed);
+            if (!allowed) return client.destroy();
             client.removeListener('data', receive);
             client.pause();
             tunnel = connect(upstream, domain + ':443', (error, remote) => {
@@ -78,6 +90,7 @@ net.createServer(client => {
 
 http.createServer((incoming, outgoing) => {
     const host = (incoming.headers.host || '').toLowerCase();
+    if (host === gitHost) return handleGit(incoming, outgoing);
     if (!domains.has(host) || !incoming.url.startsWith('/') || incoming.url.startsWith('//')) {
         outgoing.writeHead(403).end();
         return;

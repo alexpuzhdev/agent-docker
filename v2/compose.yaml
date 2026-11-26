@@ -10,8 +10,20 @@ services:
     command: ["node", "/opt/agent-docker/gateway.cjs"]
     environment:
       GATEWAY_IP: ${GATEWAY_IP:?}
+      GATEWAY_SNI_LOG: ${GATEWAY_SNI_LOG:-0}
+      GIT_HOST_PUBLISHED_ROOT: ${GIT_HOST_PUBLISHED_ROOT:-}
+      GIT_HOST_PUBLISH_SOCKET: ${GIT_HOST_PUBLISH_SOCKET:-}
+    logging:
+      driver: json-file
+      options:
+        max-size: 1m
+        max-file: "3"
     volumes:
       - ${VM_STATE:?}/upstream:/config/upstream:ro
+      - ${GIT_CONTAINER_CONFIG:-${VM_STATE:?}/git}:/config/git:ro
+      - ${GIT_CONTAINER_MIRROR:-${VM_STATE:?}/git-mirror}:/mirror
+      - ${VM_STATE:?}/git-host-public:/host-git:ro
+      - ${VM_STATE:?}/git-host-ipc:/host-git-ipc:ro
       - ${VM_STATE:?}/allowed-domains:/config/allowed-domains:ro
     networks:
       private:
@@ -21,12 +33,12 @@ services:
   vm:
     image: agent-docker-v2:local
     pull_policy: never
-    init: true
     cap_drop: [ALL]
+    cap_add: [NET_ADMIN, SETPCAP]
     security_opt: [no-new-privileges:true]
     devices:
       - /dev/kvm:/dev/kvm:rw
-    command: ["bash", "/opt/agent-docker/guest.sh"]
+    command: ["bash", "/opt/agent-docker/start-vm.sh"]
     environment:
       VM_NAME: ${VM_NAME:?}
       VCPU: ${VM_CONFIG_VCPU:?}

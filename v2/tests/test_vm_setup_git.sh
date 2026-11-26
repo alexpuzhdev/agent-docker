@@ -1,0 +1,284 @@
+#!/bin/bash
+# Проверка настройки Git-шлюза из make vm-setup с подставным docker и временным состоянием.
+set -euo pipefail
+source_root=$(cd "$(dirname "$0")/../.." && pwd -P)
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+unset REPO GIT_WRITE GIT_WRITE_BRANCH GIT_READ_BRANCHES VM VCPU RAM_MB DISK_GB
+for tool in node script setsid; do command -v "$tool" >/dev/null || { echo "Для теста нужен $tool." >&2; exit 1; }; done
+
+mkdir -p "$work/project" "$work/bin" "$work/state/vm-02"
+cp -R "$source_root/Makefile" "$source_root/.env.example" "$source_root/v2" "$work/project/"
+printf '1 512 4\n' > "$work/state/vm-02/resources"
+printf 'http://proxy.invalid:3128\n' > "$work/state/vm-02/upstream"
+config=$work/state/vm-02/git/repository.json
+cat > "$work/bin/docker" <<'EOF'
+#!/bin/bash
+git=no
+if test -f "$FAKE_GIT_CONFIG"; then git=yes; fi
+printf 'git=%s %s\n' "$git" "$*" >> "$FAKE_DOCKER_LOG"
+case " $* " in
+    *' ps -q '*|*' ps -a -q '*) echo fake-container ;;
+    *' exec '*) [[ $* == *AGENT_DOCKER_READY* ]] ;;
+    *' inspect --format {{.Image}} '*) echo sha256:fake-gateway-image ;;
+    *' image inspect sha256:fake-gateway-image '*) [[ -z ${FAKE_NO_GATEWAY_IMAGE:-} ]] ;;
+    *' --read-branches /probe.json '*)
+        if [[ -n ${FAKE_OLD_GATEWAY:-} ]]; then exit 1; fi
+        for argument; do
+            if [[ $argument == type=bind,src=*,dst=/probe.json,readonly ]]; then probe=${argument#type=bind,src=}; probe=${probe%%,dst=*}; fi
+        done
+        node "$work/project/v2/git-gateway.cjs" --read-branches "$probe" ;;
+    *' --settings /probe.json '*)
+        if [[ -n ${FAKE_OLD_GATEWAY:-} ]]; then echo 'probe/project false '; exit 0; fi
+        for argument; do
+            if [[ $argument == type=bind,src=*,dst=/probe.json,readonly ]]; then probe=${argument#type=bind,src=}; probe=${probe%%,dst=*}; fi
+        done
+        node "$work/project/v2/git-gateway.cjs" --settings "$probe" ;;
+    *' --settings /repository.json '*)
+        if [[ -n ${FAKE_OLD_SETTINGS:-} ]]; then
+            current=$(node "$work/project/v2/git-gateway.cjs" --settings "$FAKE_GIT_CONFIG") || exit
+            read -r _ _ rest <<<"$current"
+            printf '%s\n' "$rest"
+            exit 0
+        fi
+        node "$work/project/v2/git-gateway.cjs" --settings "$FAKE_GIT_CONFIG" ;;
+esac
+EOF
+chmod +x "$work/bin/docker"
+export work SHELL=/bin/bash PATH="$work/bin:$PATH" V2_STATE_DIR="$work/state" FAKE_GIT_CONFIG="$config" FAKE_DOCKER_LOG="$work/docker.log"
+
+target() {
+    if command -v make >/dev/null; then
+        make -s -C "$work/project" "$@"
+    else
+        (cd "$work/project" && env "${@:2}" bash v2/manage.sh "$1")
+    fi
+}
+run_no_tty() {
+    : > "$FAKE_DOCKER_LOG"
+    set +e
+    output=$(setsid -w bash -c "$(declare -f target); target \"\$@\"" _ "$@" 2>&1 </dev/null)
+    status=$?
+    set -e
+}
+run_tty() {
+    local input=$1 log=$work/tty.log
+    shift
+    : > "$FAKE_DOCKER_LOG"
+    : > "$log"
+    set +e
+    {
+        for _ in $(seq 1 100); do grep -q 'Отдельный токен' "$log" && { printf '%s\n' "$input"; break; }; sleep 0.1; done
+    } | script -qfec "$(declare -f target); target $(printf '%q ' "$@")" "$log" >/dev/null
+    status=$?
+    set -e
+    output=$(cat "$log")
+}
+check() { "$@" || { printf 'Провал (строка %s): %s\nКод: %s\nВывод:\n%s\n' "${BASH_LINENO[0]}" "$*" "$status" "$output" >&2; exit 1; }; }
+has() { grep -qF -- "$1" <<<"$output"; }
+lacks() { ! has "$1"; }
+docker_line() { grep -F -- "$1" "$FAKE_DOCKER_LOG" | head -1; }
+token_read=fixture_read_token_0001
+token_write=fixture_write_token_0002
+
+run_no_tty vm-setup VM=vm-02
+check test "$status" -eq 0
+check has 'vm-02 готов.'
+check test ! -e "$config"
+check test -n "$(docker_line ' up -d ')"
+
+run_no_tty vm-setup VM=vm-02 REPO=owner/repository
+check test "$status" -ne 0
+check has 'нужен интерактивный терминал'
+check test ! -e "$config"
+check test -z "$(find "$work/state/vm-02" -name '.repository.*')"
+check test -z "$(docker_line ' up -d ')"
+
+run_tty "$token_read" vm-setup VM=vm-02 REPO=owner/repository
+check test "$status" -eq 0
+check has 'токен GitHub'
+check has 'Git-шлюз настроен для vm-02.'
+check test "$(stat -c %a "$work/state/vm-02/git")" = 700
+check has 'vm-02 готов.'
+check test "$(cat "$config")" = '{"provider":"github","origin":"https://github.com","repository":"owner/repository","token":"fixture_read_token_0001","write":false,"writeBranch":""}'
+check test "$(stat -c %a "$config")" = 600
+check test "$(docker_line check-upstream.cjs | cut -d' ' -f1)" = git=no
+check test "$(docker_line /dev/kvm:/dev/kvm | cut -d' ' -f1)" = git=no
+check test "$(docker_line ' up -d ' | cut -d' ' -f1)" = git=yes
+check test "$(grep -c "$token_read" <<<"$output")" -eq 0
+check test "$(grep -c "$token_read" "$FAKE_DOCKER_LOG")" -eq 0
+cp "$config" "$work/saved.json"
+
+run_no_tty vm-setup VM=vm-02 REPO=owner/repository
+check test "$status" -eq 0
+check has 'Сохранённая настройка используется без изменений.'
+check has 'vm-02 готов.'
+check cmp -s "$config" "$work/saved.json"
+
+run_no_tty vm-setup VM=vm-02 REPO=owner/other
+check test "$status" -ne 0
+check has 'make vm-git VM=vm-02 REPO=owner/other'
+check test -z "$(docker_line ' up -d ')"
+check cmp -s "$config" "$work/saved.json"
+
+run_no_tty vm-setup VM=vm-02 REPO=owner/repository GIT_WRITE=1 GIT_WRITE_BRANCH=test/gateway-write
+check test "$status" -ne 0
+check has 'make vm-git VM=vm-02 REPO=owner/repository GIT_WRITE=1 GIT_WRITE_BRANCH=test/gateway-write'
+check test -z "$(docker_line ' up -d ')"
+check cmp -s "$config" "$work/saved.json"
+
+run_no_tty vm-setup VM=vm-02 REPO=owner/repository GIT_WRITE=1
+check test "$status" -ne 0
+check has 'GIT_WRITE_BRANCH'
+check test -z "$(docker_line ' up -d ')"
+check cmp -s "$config" "$work/saved.json"
+
+run_tty "$token_write" vm-git VM=vm-02 REPO=owner/repository GIT_WRITE=1 GIT_WRITE_BRANCH=test/gateway-write
+check test "$status" -eq 0
+check has 'токен GitHub'
+check has 'Git-шлюз настроен для vm-02.'
+check test "$(cat "$config")" = '{"provider":"github","origin":"https://github.com","repository":"owner/repository","token":"fixture_write_token_0002","write":true,"writeBranch":"test/gateway-write"}'
+check test "$(grep -c "$token_write" <<<"$output")" -eq 0
+
+run_no_tty vm-setup VM=vm-02 REPO=owner/repository GIT_WRITE=1 GIT_WRITE_BRANCH=test/gateway-write
+check test "$status" -eq 0
+check has 'Сохранённая настройка используется без изменений.'
+
+run_no_tty vm-setup VM=vm-02 REPO=owner/repository
+check test "$status" -ne 0
+check has 'make vm-git VM=vm-02 REPO=owner/repository'
+
+cat > "$config" <<'JSON'
+{
+  "write": false,
+  "token": "fixture_read_token_0001",
+  "repository": "owner/repository"
+}
+JSON
+cp "$config" "$work/saved.json"
+run_no_tty vm-setup VM=vm-02 REPO=owner/repository
+check test "$status" -eq 0
+check has 'Сохранённая настройка используется без изменений.'
+check cmp -s "$config" "$work/saved.json"
+
+printf 'broken\n' > "$config"
+cp "$config" "$work/saved.json"
+run_no_tty vm-setup VM=vm-02 REPO=owner/repository
+check test "$status" -ne 0
+check has 'Не удалось прочитать сохранённую настройку'
+check cmp -s "$config" "$work/saved.json"
+
+gitlab=(REPO=group/sub/project GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid/scm/ GIT_WRITE=1 GIT_WRITE_BRANCH=agent/task-1)
+token_gitlab=glpat-fixture.gitlab_token-0005
+rm -f "$config"
+run_no_tty vm-setup VM=vm-02 "${gitlab[@]}"
+check test "$status" -ne 0
+check has 'нужен интерактивный терминал'
+check test ! -e "$config"
+
+run_tty "$token_gitlab" vm-setup VM=vm-02 "${gitlab[@]}"
+check test "$status" -eq 0
+check has 'Отдельный токен GitLab для group/sub/project'
+check has 'Git-шлюз настроен для vm-02.'
+check test "$(cat "$config")" = '{"provider":"gitlab","origin":"https://gitlab.fixture.invalid/scm","project":"group/sub/project","token":"glpat-fixture.gitlab_token-0005","write":true,"writeBranch":"agent/task-1"}'
+check test "$(stat -c %a "$config")" = 600
+check test "$(grep -c "$token_gitlab" <<<"$output")" -eq 0
+cp "$config" "$work/saved.json"
+
+run_no_tty vm-setup VM=vm-02 "${gitlab[@]}"
+check test "$status" -eq 0
+check has 'Сохранённая настройка используется без изменений.'
+check cmp -s "$config" "$work/saved.json"
+
+run_no_tty vm-setup VM=vm-02 REPO=group/project GIT_WRITE=1 GIT_WRITE_BRANCH=agent/task-1
+check test "$status" -ne 0
+check has 'с другим провайдером, репозиторием или режимом записи'
+check has 'make vm-git VM=vm-02 REPO=group/project GIT_WRITE=1 GIT_WRITE_BRANCH=agent/task-1'
+check cmp -s "$config" "$work/saved.json"
+
+run_no_tty vm-setup VM=vm-02 REPO=group/sub/project GIT_PROVIDER=gitlab GIT_URL=https://gitlab.other.invalid GIT_WRITE=1 GIT_WRITE_BRANCH=agent/task-1
+check test "$status" -ne 0
+check has 'make vm-git VM=vm-02 REPO=group/sub/project GIT_PROVIDER=gitlab GIT_URL=https://gitlab.other.invalid GIT_WRITE=1 GIT_WRITE_BRANCH=agent/task-1'
+check cmp -s "$config" "$work/saved.json"
+
+for invalid in 'GIT_PROVIDER=bitbucket REPO=owner/repository|GIT_PROVIDER=github или GIT_PROVIDER=gitlab' \
+    'GIT_PROVIDER=gitlab REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=http://gitlab.fixture.invalid REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://user:pass@gitlab.fixture.invalid REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid?x=1 REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://github.com REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid REPO=project|REPO=group/subgroup/project' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid/.. REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid/./x REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://GitLab.fixture.invalid REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://10.0.0.5 REPO=group/project|по DNS-имени' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://10.0.0.5:8443/scm REPO=group/project|по DNS-имени' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://github.com:443 REPO=group/project|по DNS-имени' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://www.github.com REPO=group/project|по DNS-имени' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://github.com/scm REPO=group/project|по DNS-имени' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid:65536 REPO=group/project|по DNS-имени' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://user@gitlab.fixture.invalid REPO=group/project|GIT_URL=https://gitlab.example.com' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid REPO=group/project.git|REPO=group/subgroup/project' \
+    'GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid REPO=group/-x|REPO=group/subgroup/project' \
+    'GIT_URL=https://gitlab.fixture.invalid REPO=owner/repository|GIT_URL задаётся только вместе с GIT_PROVIDER=gitlab'; do
+    read -r -a arguments <<<"${invalid%%|*}"
+    run_no_tty vm-setup VM=vm-02 "${arguments[@]}"
+    check test "$status" -ne 0
+    check has "${invalid#*|}"
+    check lacks 'Отдельный токен'
+    check cmp -s "$config" "$work/saved.json"
+done
+
+for accepted in 'https://gitlab.fixture.invalid:65535/a.b/c_d' 'https://gitlab' 'https://scm-01.fixture.invalid'; do
+    run_no_tty vm-git VM=vm-02 GIT_PROVIDER=gitlab GIT_URL="$accepted" REPO=group/project
+    check test "$status" -ne 0
+    check has 'нужен интерактивный терминал'
+    check cmp -s "$config" "$work/saved.json"
+done
+
+for gateway in FAKE_OLD_GATEWAY FAKE_NO_GATEWAY_IMAGE; do
+    for command in vm-git vm-setup; do
+        : > "$FAKE_DOCKER_LOG"
+        set +e
+        output=$(env "$gateway=1" setsid -w bash -c "$(declare -f target); target \"\$@\"" _ "$command" VM=vm-02 \
+            REPO=group/other GIT_PROVIDER=gitlab GIT_URL=https://gitlab.fixture.invalid 2>&1 </dev/null)
+        status=$?
+        set -e
+        check test "$status" -ne 0
+        check has 'не поддерживает GitLab'
+        check lacks 'Отдельный токен'
+        check test -z "$(docker_line ' up -d ')"
+        check cmp -s "$config" "$work/saved.json"
+    done
+done
+check test -z "$(find "$work/state/vm-02/git" -name '.probe.*')"
+
+printf '{"provider":"github","origin":"https://github.com","repository":"owner/repository","token":"fixture_read_token_0001","write":false,"writeBranch":""}\n' > "$config"
+cp "$config" "$work/saved.json"
+: > "$FAKE_DOCKER_LOG"
+set +e
+output=$(FAKE_OLD_SETTINGS=1 setsid -w bash -c "$(declare -f target); target \"\$@\"" _ vm-setup VM=vm-02 REPO=owner/repository 2>&1 </dev/null)
+status=$?
+set -e
+check test "$status" -eq 0
+check has 'Сохранённая настройка используется без изменений.'
+check cmp -s "$config" "$work/saved.json"
+
+run_no_tty vm-git VM=vm-02 REPO=owner/repository GIT_READ_BRANCHES=work=private/reference
+check test "$status" -ne 0
+check lacks 'Отдельный токен'
+check cmp -s "$config" "$work/saved.json"
+
+run_tty "$token_read" vm-git VM=vm-02 REPO=owner/repository GIT_READ_BRANCHES=reference=private/reference
+check test "$status" -eq 0
+check lacks "$token_read"
+check grep -qF '"readBranches":{"reference":"private/reference"}' "$config"
+run_no_tty vm-git-status VM=vm-02
+check test "$status" -eq 0
+check has 'Ветки чтения: reference=private/reference'
+check lacks "$token_read"
+
+check test -f "$work/project/.env"
+check test "$(grep -rlE --exclude-dir=tests 'fixture_(read|write)_token|gitlab_token' "$work/project" | wc -l)" -eq 0
+check test -z "$(find "$work/state/vm-02/git" -name '.repository.*')"
+printf 'test_vm_setup_git: ok (%s)\n' "$(command -v make >/dev/null && echo make || echo 'bash v2/manage.sh без make')"

@@ -1,0 +1,36 @@
+[Unit]
+Description=Atrice direct session entry
+Requires=atrice-tmux-server.service
+After=atrice-tmux-server.service
+After=dev-virtio\x2dports-atrice.session.device
+# Служба включается явным шагом оператора и только там, где прямой вход в
+# сессии нужен: без неё порт остаётся ничем не занят, а хост сам видит это
+# состоянием absent или silent и работает по-прежнему через консоль.
+
+[Service]
+# Тот же пользователь, что у агентов: иначе служба не увидит их сервер tmux.
+# Root ей не нужен, новых прав агенту не выдаётся.
+User=agent
+Group=agent
+ExecStart=/usr/bin/python3 -I /usr/local/lib/atrice/session-responder.py
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+# Сети нет структурно, а не по договорённости: туннелей и портов этот путь не
+# открывает вовсе.
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+MemoryMax=128M
+# Процессов нужно больше, чем читающей службе: у каждого входа свой клиент
+# tmux на своём pty. Предел всё равно узкий.
+TasksMax=64
+# Клиент подключается к общему сокету в /run/atrice/sessions. Сервер tmux
+# запускается отдельно и создаёт сессии с обычным окружением агента.
+
+[Install]
+WantedBy=multi-user.target

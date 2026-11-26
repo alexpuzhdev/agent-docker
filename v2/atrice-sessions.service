@@ -1,0 +1,39 @@
+[Unit]
+Description=Atrice sessions channel
+After=dev-virtio\x2dports-atrice.control.device
+# Каталог сокета tmux создаёт systemd-tmpfiles по
+# /usr/lib/tmpfiles.d/atrice-sessions.conf. Он готов задолго до старта службы:
+# обычные зависимости юнита ведут через basic.target, то есть после
+# systemd-tmpfiles-setup.service. Своего каталога служба не создаёт.
+
+[Service]
+# Служба работает под тем же пользователем, что и агенты: иначе она не увидит
+# их сервер tmux. Root ей не нужен, новых прав агенту не выдаётся.
+User=agent
+Group=agent
+ExecStart=/usr/bin/python3 -I /usr/local/lib/atrice/sessions-responder.py
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+# Сети у службы нет структурно, а не по договорённости.
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+MemoryMax=64M
+TasksMax=32
+# Ограничения не ослаблены намеренно, и права на запись службе не нужны.
+# При ProtectSystem=strict вся иерархия только для чтения, поэтому mkdir
+# каталога сокета отвечает EROFS — из-за этого tmux с меткой -L падал на
+# первом запросе. Подключение к уже существующему сокету на дереве только для
+# чтения при этом разрешено: EROFS проверяется для обычных файлов, каталогов и
+# ссылок, а сокет не из них. Служба и подключается, а каталог готовит
+# systemd-tmpfiles.
+# PrivateTmp здесь нельзя: прежний сокет tmux лежит в /tmp и остаётся вторым
+# проверяемым путём для гостей, где сессия уже запущена прежним способом.
+
+[Install]
+WantedBy=multi-user.target
